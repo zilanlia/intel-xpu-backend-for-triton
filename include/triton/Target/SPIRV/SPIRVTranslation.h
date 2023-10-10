@@ -25,6 +25,9 @@ LogicalResult disassembleSPIRV(uint32_t *binary_ptr, size_t binary_size,
 std::string translateTritonGPUToSPIRVIR(mlir::ModuleOp module,
                                         std::map<std::string, int>);
 
+// Translate XeGPU dialect to SPIRV, return null if failed.
+std::string translateXeGPUToSPIRVIR(mlir::ModuleOp module,
+                                    std::map<std::string, int>);
 } // namespace triton
 } // namespace mlir
 

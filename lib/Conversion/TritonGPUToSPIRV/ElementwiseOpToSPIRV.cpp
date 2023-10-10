@@ -399,16 +399,13 @@ private:
 
     mlir::OpBuilder b(v.getDefiningOp()->getParentOfType<spirv::FuncOp>());
     NamedAttrList attributes(extraAttrs);
-    attributes.set("libname", StringAttr::get(v.getContext(), libName));
-    attributes.set("libpath", StringAttr::get(v.getContext(), ""));
-    auto linkageTypeAttr =
-        b.getAttr<::mlir::spirv::LinkageTypeAttr>(spirv::LinkageType::Import);
-    auto linkageAttr = b.getAttr<::mlir::spirv::LinkageAttributesAttr>(
-        funcName.str(), linkageTypeAttr);
-    attributes.set("linkage_attributes", linkageAttr);
     auto ret =
         b.create<spirv::FuncOp>(v.getLoc(), funcName, funcType,
-                                spirv::FunctionControl::Inline, attributes);
+                                spirv::FunctionControl::Inline);
+    ret.getOperation()->setAttr(
+        "libname", StringAttr::get(v.getContext(), libName));
+    ret.getOperation()->setAttr(
+        "libpath", StringAttr::get(v.getContext(), ""));
     return ret;
   }
 };
@@ -658,16 +655,13 @@ private:
 
     auto parent = ((Operation *)op)->getParentOfType<spirv::FuncOp>();
     mlir::OpBuilder b(parent);
-    auto ret = b.create<spirv::FuncOp>(op->getLoc(), funcName, funcType);
+    auto ret =
+        b.create<spirv::FuncOp>(op->getLoc(), funcName, funcType,
+                                spirv::FunctionControl::Inline);
     ret.getOperation()->setAttr(
-        "libname", StringAttr::get(op->getContext(), op.getLibname()));
+        "libname", StringAttr::get(op->getContext(), funcName));
     ret.getOperation()->setAttr(
-        "libpath", StringAttr::get(op->getContext(), op.getLibpath()));
-    auto linkageTypeAttr =
-        b.getAttr<::mlir::spirv::LinkageTypeAttr>(spirv::LinkageType::Import);
-    auto linkageAttr = b.getAttr<::mlir::spirv::LinkageAttributesAttr>(
-        funcName.str(), linkageTypeAttr);
-    ret.getOperation()->setAttr("linkage_attributes", linkageAttr);
+        "libpath", StringAttr::get(op->getContext(), ""));
     return ret;
   }
 };

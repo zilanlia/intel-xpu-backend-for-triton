@@ -23,6 +23,7 @@
 #include <string>
 
 #include "triton/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.h"
+#include "triton/Conversion/TritonGPUToXeGPU/TritonGPUToXeGPUPass.h"
 #include "triton/Dialect/Triton/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
 #include "triton/Target/SPIRV/SPIRVTranslation.h"
@@ -199,6 +200,19 @@ void init_triton_translation(py::module &m) {
       },
       ret::take_ownership);
 
+  m.def(
+          "translate_xegpu_to_spirv",
+          [](mlir::ModuleOp op, py::dict computeCapability) {
+            auto capabilities =
+                computeCapability.cast<std::map<std::string, int>>();
+            auto spirvModule = ::mlir::triton::translateXeGPUToSPIRVIR(op, std::move(capabilities));
+            if (spirvModule.empty())
+              llvm::report_fatal_error("Failed to translate TritonGPU to SPIRV IR.");
+
+            return spirvModule;
+          },
+          ret::take_ownership);
+
   m.def("add_external_libs",
         [](mlir::ModuleOp &op, const std::vector<std::string> &names,
            const std::vector<std::string> &paths) {
@@ -289,6 +303,11 @@ void init_triton_translation(py::module &m) {
                 numWarps, threadsPerWarp));
           },
           py::arg("numWarps") = 4, py::arg("threadsPerWarp") = 32)
+      .def("add_convert_tritongpu_to_xegpu_pass",
+           [](mlir::PassManager &self) {
+             self.addPass(
+                 mlir::triton::createConvertTritonGPUToXeGPUPass());
+           })
       .def("add_tritongpu_pipeline_pass",
            [](mlir::PassManager &self, int numStages) {
              self.addPass(mlir::createTritonGPUPipelinePass(numStages));
