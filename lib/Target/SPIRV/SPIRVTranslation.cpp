@@ -1,9 +1,12 @@
 #include "mlir/Conversion/Passes.h"
 #include "mlir/Dialect/SPIRV/IR/SPIRVOps.h"
 #include "mlir/Dialect/SPIRV/IR/TargetAndABI.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVDialect.h"
+#include "mlir/Dialect/SPIRV/IR/SPIRVTypes.h"
 #include "mlir/ExecutionEngine/ExecutionEngine.h"
 #include "mlir/ExecutionEngine/OptUtils.h"
 #include "mlir/IR/Dialect.h"
+#include "mlir/Parser/Parser.h"
 #include "mlir/Pass/Pass.h"
 #include "mlir/Pass/PassManager.h"
 #include "mlir/Target/LLVMIR/LLVMTranslationInterface.h"
@@ -22,6 +25,8 @@
 
 #include <dlfcn.h>
 #include <filesystem>
+#include <fstream>
+#include <iostream>
 
 namespace mlir {
 namespace triton {
@@ -388,6 +393,12 @@ static LogicalResult translateTritonSPIRVToSPIRVIR(ModuleOp module,
 
       builder.create<spirv::ExecutionModeOp>(
           op.getLoc(), op, spirv::ExecutionMode::SubgroupSize, threadsPerWarp);
+      
+      builder.create<spirv::ExecutionModeOp>(
+          op.getLoc(), op, spirv::ExecutionMode::SharedLocalMemorySizeINTEL, 16384);
+
+      builder.create<spirv::ExecutionModeOp>(
+          op.getLoc(), op, spirv::ExecutionMode::NamedBarrierCountINTEL, 16);
 
       op->removeAttr(entryPointAttrName);
       op->removeAttr("sym_visibility");
@@ -512,14 +523,14 @@ std::string translateXeGPUToSPIRVIR(mlir::ModuleOp module,
   llvm::outs()<<"\n\nafter passed module: \n\n";
   module.print(llvm::outs());
 
-  // //load spirv from file(only for test)
+  //load spirv from file(only for test)
   // mlir::DialectRegistry registry;
   // registry.insert<mlir::spirv::SPIRVDialect>();
   // MLIRContext context(registry);
   // context.allowUnregisteredDialects(1);
 
   // const mlir::ParserConfig config(&context);
-  // std::string filePath = "/home/triton-torch-xpu-performance/python/dumpIR/XeGPU/spirv_vadd.mlir";
+  // std::string filePath = "/home/triton-xpu/python/dumpIR/test.mlir";
 
   // std::ifstream fileStream(filePath);
   // if (!fileStream.is_open()) {

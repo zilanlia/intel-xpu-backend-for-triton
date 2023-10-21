@@ -69,7 +69,7 @@ public:
     addIllegalDialect<mlir::gpu::GPUDialect>();
     addIllegalDialect<::mlir::arith::ArithDialect>();
     addIllegalDialect<::mlir::vector::VectorDialect>();
-    //addIllegalDialect<::mlir::memref::MemRefDialect>();
+    addIllegalDialect<::mlir::memref::MemRefDialect>();
     addLegalDialect<spirv::SPIRVDialect>();
     addLegalOp<UnrealizedConversionCastOp>();
   }
@@ -86,11 +86,9 @@ struct FuncOpConversion : public OpConversionPattern<mlir::gpu::GPUFuncOp> {
   LogicalResult
   matchAndRewrite(mlir::gpu::GPUFuncOp funcOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    //llvm::outs()<<"\n\nfuncOp: "<<funcOp<<"\n";
     auto mod = dyn_cast<mlir::gpu::GPUModuleOp>(funcOp->getParentOp());
-    //llvm::outs()<<"\n\nmod: "<<mod<<"\n";
     auto mod1 = dyn_cast<mlir::ModuleOp>(mod->getParentOp());
-    //llvm::outs()<<"\n\nmod1: "<<mod1<<"\n";
+
     if (!mod)
       return failure();
 
@@ -241,7 +239,7 @@ void GPUXToSPIRVPass::runOnOperation() {
 
     mlir::RewritePatternSet patterns(context);
     mlir::SPIRVConversionOptions options;
-    options.use64bitIndex = true;
+    options.use64bitIndex = false;
 
     XeGPUToSPIRVTypeConverter typeConverter(targetAttr, options);
     XeGPUSPIRVFunctionConversionTarget funcTarget(*context, typeConverter);

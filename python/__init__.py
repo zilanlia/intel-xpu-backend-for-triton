@@ -57,10 +57,10 @@ def optimize_ttgir(mod, num_stages, arch):
     # pm.add_tritongpu_remove_layout_conversions_pass()
     # pm.add_triton_intel_gpu_accelerate_matmul_pass(arch)
     # pm.add_tritongpu_remove_layout_conversions_pass()
-    pm.add_tritongpu_optimize_dot_operands_pass()
+    # pm.add_tritongpu_optimize_dot_operands_pass()
     pm.add_tritongpu_pipeline_pass(num_stages)
     pm.add_tritongpu_prefetch_pass()
-    pm.add_tritongpu_optimize_dot_operands_pass()
+    # pm.add_tritongpu_optimize_dot_operands_pass()
     # pm.add_tritongpu_remove_layout_conversions_pass()
     pm.add_tritongpu_decompose_conversions_pass()
     pm.add_tritongpu_reorder_instructions_pass()
@@ -239,13 +239,15 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
   uint32_t num_params = sizeof(params)/sizeof(params[0]);
   uint32_t expected_num_params = kernel_ptr.get_info<sycl::info::kernel::num_args>();
 
-  //size_t global_range_x = gridX*threads_per_warp*num_warps/32;
-  size_t global_range_x = 1;
+  size_t global_range_x = gridX*32;
+  //size_t global_range_x = 32;
+  std::cout << "global_range_x: " << global_range_x << std::endl;
   size_t global_range_y = gridY;
   size_t global_range_z = gridZ;
 
   //size_t local_range_x = num_warps*threads_per_warp;
-  size_t local_range_x = 1;
+  size_t local_range_x = 32;
+  std::cout << "local_range_x: " << local_range_x << std::endl;
   size_t local_range_y = 1;
   size_t local_range_z = 1;
 
@@ -253,7 +255,7 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
   sycl::range<3> local_range(local_range_z, local_range_y, local_range_x);
   sycl::nd_range<3> parallel_work_size(global_range, local_range);
 
-  if (getBoolEnv("MLIR_ENABLE_DUMP")){{
+  if (1 || getBoolEnv("MLIR_ENABLE_DUMP")){{
     std::cout << "kernel info name:" << kernel_name << " @" << &kernel_ptr << std::endl;
     std::cout << "kernel info attributes:" << kernel_ptr.get_info<sycl::info::kernel::attributes>() << std::endl;
     std::cout << "kernel info reference_count:" << kernel_ptr.get_info<sycl::info::kernel::reference_count>() << std::endl;
@@ -276,8 +278,8 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
    //if (shared_memory) {{
    //  expected_num_params -= 1;
    //}}
-  std::cout<<"num_params: "<<num_params<<std::endl;
-  std::cout<<"expected num_params: "<<expected_num_params<<std::endl;
+  std::cout<<"num_params : "<<num_params<<std::endl;
+  std::cout<<"expected num_params  :  "<<expected_num_params<<std::endl;
   assert(num_params == expected_num_params && "number of kernel param not matched");
 
   // Submit the imported kernel.

@@ -7,6 +7,7 @@
 
 using namespace mlir;
 using namespace mlir::triton;
+using namespace mlir::triton::xegpu;
 
 XeGPUToSPIRVTypeConverter::XeGPUToSPIRVTypeConverter(
        spirv::TargetEnvAttr &targetAttr, SPIRVConversionOptions &option)
@@ -22,7 +23,14 @@ XeGPUToSPIRVTypeConverter::XeGPUToSPIRVTypeConverter(
   });
 
   addConversion([&](::mlir::triton::xegpu::TensorDescType type) -> llvm::Optional<Type> {
-    return type;
+    auto encoding = type.getEncoding();
+    if(encoding == MemoryScopeAttr::get(type.getContext(), MemoryScope::SLM))
+    {
+      return IntegerType::get(type.getContext(), 32);
+    } else if(encoding == MemoryScopeAttr::get(type.getContext(), MemoryScope::GLOBAL)){
+      return IntegerType::get(type.getContext(), 64);
+    }
+    return IntegerType::get(type.getContext(), 64);
   });
 
   // Internally store bfloat16 as int16
@@ -67,6 +75,5 @@ Type XeGPUToSPIRVTypeConverter::convertXeGPUMemRefType(
 
   assert(storageClass && "uncompatible pointer address type in SPIRV");
   auto ret = spirv::PointerType::get(convertType(type.getElementType()), *storageClass);
- 
   return ret;
 }

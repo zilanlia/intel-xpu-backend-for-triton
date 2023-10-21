@@ -33,25 +33,43 @@ using namespace mlir;
 using namespace mlir::triton::xegpu;
 using namespace mlir::triton;
 
+Value createConstantI32(Location loc, PatternRewriter &rewriter, int32_t v) {
+  auto i32ty = rewriter.getIntegerType(32);
+  return rewriter.create<spirv::ConstantOp>(loc, i32ty,
+                                           IntegerAttr::get(i32ty, v));
+}
+
+Value createConstantI64(Location loc, PatternRewriter &rewriter, int64_t v) {
+  auto i64ty = rewriter.getIntegerType(64);
+  return rewriter.create<spirv::ConstantOp>(loc, i64ty,
+                                           IntegerAttr::get(i64ty, v));
+}
+
+#define zext(...) rewriter.create<spirv::UConvertOp>(loc, __VA_ARGS__)
+#define logic_shl(...) rewriter.create<spirv::ShiftLeftLogicalOp>(loc, __VA_ARGS__)
+#define bitwise_or(...) rewriter.create<spirv::BitwiseOrOp>(loc, __VA_ARGS__)
+#define bitwise_and(...) rewriter.create<spirv::BitwiseAndOp>(loc, __VA_ARGS__)
+#define i32_val(...) createConstantI32(loc, rewriter, __VA_ARGS__)
+#define i64_val(...) createConstantI64(loc, rewriter, __VA_ARGS__)
+#define i16_val(value) rewriter.create<spirv::ConstantOp>(loc, rewriter.getIntegerType(16), rewriter.getI16IntegerAttr(value))
+#define i8_val(value) rewriter.create<spirv::ConstantOp>(loc, rewriter.getIntegerType(8), rewriter.getI8IntegerAttr(value))
+#define i1_val(value) rewriter.create<spirv::ConstantOp>(loc, rewriter.getI1Type(), rewriter.getBoolAttr(value))
+
 /// @brief encodeVectorType(xxx, 8x8x2xf16, true) returns ["v64i32", 64xi32]
 std::pair<std::string, VectorType>
 encodeVectorType(ConversionPatternRewriter &rewriter, VectorType type,
-                 bool cast = true) {
+                 bool use64bitData = false) {
   auto elemType = type.getElementType();
   auto bitWidth = elemType.getIntOrFloatBitWidth();
-  auto rank = type.getRank();
-  auto shape = type.getShape();
-  auto size = shape[0];
-  for(int i=1;i<shape.size();i++){
-    size *= shape[1];
-  }
-
-  if (!cast && bitWidth == 16) {
-    assert(shape[rank - 1] == 2);
-    size *= 2;
+  int size = type.getNumElements() * bitWidth / 32;
+  if (use64bitData) {
+    size /= 2;
   }
   std::string str;
   switch (size) {
+  case 1:
+    str += "v1";
+    break;
   case 2:
     str += "v2";
     break;
@@ -71,18 +89,14 @@ encodeVectorType(ConversionPatternRewriter &rewriter, VectorType type,
     assert(0 && "add more support");
     break;
   }
-  if (elemType == rewriter.getF32Type())
+  if (use64bitData) {
+    str += "i64";
+    elemType = rewriter.getI64Type();
+  } else if (elemType == rewriter.getF32Type())
     str += "f32";
-  else if (elemType == rewriter.getI32Type())
-    str += "i32";
   else if (elemType == rewriter.getF16Type()) {
-    if (cast) {
-      assert(shape[rank - 1] == 2);
-      str += "i32";
-      elemType = rewriter.getI32Type();
-    } else {
-      str += "f16";
-    }
+    str += "i32";
+    elemType = rewriter.getI32Type();
   } else
     assert(0 && "add more support");
   auto newType = VectorType::get(size, elemType);
@@ -102,6 +116,65 @@ unsigned encodeDataum(Type type) {
     assert(0 && "add more support");
     return 0;
   }
+}
+
+template <typename OpType> unsigned encodeCacheHint(OpType op) {
+  auto l1hint = op.getL1Hint();
+  // auto l2hint = op.getL2Hint();
+  auto l3hint = op.getL3Hint();
+  constexpr bool isWrite = std::is_same_v<OpType, StoreNDOp> ||
+                           std::is_same_v<OpType, StoreScatterOp>;
+  unsigned cacheHint = 1;
+  if constexpr (!isWrite) {
+    auto l1CacheValue =
+        l1hint.has_value() ? l1hint.value() : xegpu::CacheReadHint::UNCACHED;
+    auto l3CacheValue =
+        l3hint.has_value() ? l3hint.value() : xegpu::CacheReadHint::UNCACHED;
+    if (l1CacheValue == xegpu::CacheReadHint::UNCACHED) {
+      if (l3CacheValue == xegpu::CacheReadHint::UNCACHED)
+        cacheHint = 1;
+      else if (l3CacheValue == xegpu::CacheReadHint::CACHED)
+        cacheHint = 2;
+    } else if (l1CacheValue == xegpu::CacheReadHint::CACHED) {
+      if (l3CacheValue == xegpu::CacheReadHint::UNCACHED)
+        cacheHint = 3;
+      else if (l3CacheValue == xegpu::CacheReadHint::CACHED)
+        cacheHint = 4;
+    } else if (l1CacheValue == xegpu::CacheReadHint::STREAMING) {
+      if (l3CacheValue == xegpu::CacheReadHint::UNCACHED)
+        cacheHint = 5;
+      else if (l3CacheValue == xegpu::CacheReadHint::CACHED)
+        cacheHint = 6;
+    } else if (l1CacheValue == xegpu::CacheReadHint::READ_INVALIDATE) {
+      if (l3CacheValue == xegpu::CacheReadHint::CACHED)
+        cacheHint = 7;
+    }
+  } else {
+    auto l1CacheValue =
+        l1hint.has_value() ? l1hint.value() : xegpu::CacheWriteHint::UNCACHED;
+    auto l3CacheValue =
+        l3hint.has_value() ? l3hint.value() : xegpu::CacheWriteHint::UNCACHED;
+    if (l1CacheValue == xegpu::CacheWriteHint::UNCACHED) {
+      if (l3CacheValue == xegpu::CacheWriteHint::UNCACHED)
+        cacheHint = 1;
+      else if (l3CacheValue == xegpu::CacheWriteHint::WRITE_BACK)
+        cacheHint = 2;
+    } else if (l1CacheValue == xegpu::CacheWriteHint::WRITE_THROUGH) {
+      if (l3CacheValue == xegpu::CacheWriteHint::UNCACHED)
+        cacheHint = 3;
+      else if (l3CacheValue == xegpu::CacheWriteHint::WRITE_BACK)
+        cacheHint = 4;
+    } else if (l1CacheValue == xegpu::CacheWriteHint::STREAMING) {
+      if (l3CacheValue == xegpu::CacheWriteHint::UNCACHED)
+        cacheHint = 5;
+      else if (l3CacheValue == xegpu::CacheWriteHint::WRITE_BACK)
+        cacheHint = 6;
+    } else if (l1CacheValue == xegpu::CacheWriteHint::WRITE_BACK) {
+      if (l3CacheValue == xegpu::CacheWriteHint::WRITE_BACK)
+        cacheHint = 7;
+    }
+  }
+  return cacheHint;
 }
 
 void lookupOrInsertIntrinsic(ConversionPatternRewriter &rewriter, Operation *op,
@@ -136,111 +209,415 @@ void lookupOrInsertIntrinsic(ConversionPatternRewriter &rewriter, Operation *op,
   }
 }
 
-// class InitTileToVCPattern : public OpConversionPattern<InitTileOp> {
-// public:
-//   using OpConversionPattern<InitTileOp>::OpConversionPattern;
-//   LogicalResult
-//   matchAndRewrite(InitTileOp op, OpAdaptor adaptor,
-//                   ConversionPatternRewriter &rewriter) const override {
-//     rewriter.replaceOpWithNewOp<spirv::ConvertPtrToUOp>(
-//         op, rewriter.getI64Type(), adaptor.getSource());
+class CreateNdDescToVCPattern : public OpConversionPattern<CreateNdDescOp> {
+public:
+  using OpConversionPattern<CreateNdDescOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(CreateNdDescOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto src = adaptor.getSource();
+    Type type = src.getType();
+    // auto i64Type = rewriter.getIntegerType(64);
+    llvm::outs()<<"\n\nCreateNdDescToVCPattern Type: "<<type<<"\n";
+    if(isa<mlir::IntegerType>(type)){
+      rewriter.replaceOp(op, src);
+      llvm::outs()<<"\n\nCreateNdDescToVCPattern Type isa<mlir::IntegerType>\n";
+    }else{
+      rewriter.replaceOpWithNewOp<spirv::ConvertPtrToUOp>(
+          op, rewriter.getI64Type(), adaptor.getSource());
+    }
 
-//     return success();
-//   }
-// };
+    return success();
+  }
+};
 
-// template <typename OpType>
-// class LoadStore2dToVCPattern : public OpConversionPattern<OpType> {
-// public:
-//   using OpConversionPattern<OpType>::OpConversionPattern;
-//   LogicalResult
-//   matchAndRewrite(OpType op, typename OpType::Adaptor adaptor,
-//                   ConversionPatternRewriter &rewriter) const override {
-//     llvm::outs()<<"\n\nLoadStore2dToVCPattern\n";
-//     auto loc = op.getLoc();
-//     ::mlir::VectorType vecType;
-//     std::string funcName;
-//     constexpr bool isLoad = std::is_same_v<OpType, Load2DOp>;
-//     if constexpr (isLoad) {
-//       vecType = cast<VectorType>(op.getResult().getType());
-//       funcName = "llvm_genx_lsc_load2d_stateless_";
-//     } else {
-//       vecType = cast<VectorType>(op.getValue().getType());
-//       funcName = "llvm_genx_lsc_store2d_stateless_i1_i64_";
-//     }
-//     auto createIntConstant = [&](Type type, unsigned value) {
-//       auto attr = rewriter.getIntegerAttr(type, value);
-//       return rewriter.create<spirv::ConstantOp>(loc, type, attr);
-//     };
-//     auto i8Type = rewriter.getI8Type();
-//     auto i32Type = rewriter.getI32Type();
-//     // predicate(true for now)
-//     auto pred = createIntConstant(rewriter.getI1Type(), 1);
-//     // cached(0 for now)
-//     auto cacheHint = createIntConstant(i8Type, 0);
-//     unsigned cst = encodeDataum(vecType.getElementType());
-//     auto dataum = createIntConstant(i8Type, cst);
-//     auto transpose =
-//         createIntConstant(i8Type, op->hasAttr("Transpose") ? 2 : 1);
-//     // number of blocks(1 for now)
-//     auto nBlks = createIntConstant(i8Type, 1);
-//     // tile shape is in-memory shape?
-//     auto tileType = op.getTile().getType();
-//     auto blockWidth = tileType.getShape()[1];
-//     auto blockHeight = tileType.getShape()[0];
-//     auto blockW = createIntConstant(i32Type, blockWidth);
-//     auto blockH = createIntConstant(i32Type, blockHeight);
-//     auto transform =
-//         createIntConstant(i8Type, op->hasAttr("VNNI_AXIS") ? 1 : 0);
-//     auto base = adaptor.getTile();
-//     auto initOp = op.getTile().template getDefiningOp<InitTileOp>();
-//     auto memType = cast<MemRefType>(initOp.getSource().getType());
-//     unsigned bitWidth = memType.getElementType().getIntOrFloatBitWidth();
-//     auto surfaceWidth = memType.getShape()[1] * (bitWidth / 8) - 1;
-//     auto surfaceHeight = memType.getShape()[0] - 1;
-//     // FIXME: pitch = width for now
-//     auto surfacePitch = surfaceWidth;
-//     auto surfaceW = createIntConstant(i32Type, surfaceWidth);
-//     auto surfaceH = createIntConstant(i32Type, surfaceHeight);
-//     auto surfaceP = createIntConstant(i32Type, surfacePitch);
-//     auto offsetX = createIntConstant(i32Type, initOp.getStaticOffsets()[1]);
-//     auto offsetY = createIntConstant(i32Type, initOp.getStaticOffsets()[0]);
-//     SmallVector<Value> args{pred,      cacheHint, cacheHint, dataum,
-//                             transpose, nBlks,     blockW,    blockH,
-//                             transform, base,      surfaceW,  surfaceH,
-//                             surfaceP,  offsetX,   offsetY};
-//     std::string typeStr;
-//     VectorType newType;
-//     std::tie(typeStr, newType) = encodeVectorType(rewriter, vecType);
-//     if constexpr (!isLoad) {
-//       args.push_back(adaptor.getValue());
-//     }
-//     funcName += typeStr;
-//     if constexpr (isLoad) {
-//       funcName += "_i1_i64";
-//       auto retType = newType;
-//       auto funcType =
-//           rewriter.getFunctionType(ValueRange(args).getTypes(), retType);
-//       Operation *opPtr = op;
-//       lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
-//       Value funcOp =
-//           rewriter.create<spirv::FunctionCallOp>(
-//             loc, 
-//             retType, 
-//             mlir::FlatSymbolRefAttr::get(rewriter.getContext(), funcName), 
-//             args).getResults()[0];
-//       rewriter.replaceOp(op, funcOp);
-//     } else {
-//       auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {});
-//       Operation *opPtr = op;
-//       lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
-//       auto funcOp = rewriter.create<spirv::FunctionCallOp>(loc, TypeRange(),
-//                                                            funcName, args);
-//       rewriter.eraseOp(op);
-//     }
-//     return success();
-//   }
-// };
+template <typename OpType>
+class LoadStorePrefetchNdToLsc : public OpConversionPattern<OpType> {
+public:
+  using OpConversionPattern<OpType>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(OpType op, typename OpType::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto tileType = op.getTensorDesc().getType();
+    int rank = tileType.getRank();
+    assert(rank <= 2 && "only support 1d/2d load/store/prefetch for now");
+    auto loc = op.getLoc();
+    ::mlir::VectorType vecType;
+    std::string funcName;
+    constexpr bool isLoad = std::is_same_v<OpType, LoadNDOp>;
+    constexpr bool isPrefetch = std::is_same_v<OpType, PrefetchNDOp>;
+    if constexpr (isLoad) {
+      vecType = cast<VectorType>(op.getResult().getType());
+      funcName = rank == 2 ? "llvm_genx_lsc_load2d_stateless_"
+                           : "llvm_genx_lsc_load_stateless_";
+    } else if constexpr (isPrefetch) {
+      vecType = VectorType::get({8, 16}, rewriter.getF32Type());
+      funcName = rank == 2 ? "llvm_genx_lsc_prefetch2d_stateless_i1_i64"
+                           : "llvm_genx_lsc_prefetch_stateless_";
+    } else {
+      vecType = cast<VectorType>(op.getValue().getType());
+      funcName = rank == 2 ? "llvm_genx_lsc_store2d_stateless_i1_i64_"
+                           : "llvm_genx_lsc_store_stateless_i1_i64_";
+    }
+    auto createIntConstant = [&](Type type, unsigned value) {
+      auto attr = rewriter.getIntegerAttr(type, value);
+      return rewriter.create<spirv::ConstantOp>(loc, type, attr);
+    };
+    auto i8Type = rewriter.getI8Type();
+    auto i16Type = rewriter.getI16Type();
+    auto i32Type = rewriter.getI32Type();
+    auto vnni = false;
+    auto transpose = false;
+    if constexpr (isLoad) {
+      auto vnniValue = op.getVnniAxis();
+      vnni = vnniValue.has_value() && vnniValue.value() == 0 ? true : false;
+      auto transposeValue = op.getTranspose();
+      transpose = transposeValue.has_value() && transposeValue.value()[0] == 1
+                      ? true
+                      : false;
+    }
+    auto l1hint = op.getL1Hint();
+    // auto l2hint = op.getL2Hint();
+    auto l3hint = op.getL3Hint();
+
+    // predicate(true for now)
+    auto pred = createIntConstant(rewriter.getI1Type(), 1);
+    auto l1CacheHint =
+        createIntConstant(i8Type, l1hint.has_value() ? (int)l1hint.value() : 0);
+    auto l3CacheHint =
+        createIntConstant(i8Type, l3hint.has_value() ? (int)l3hint.value() : 0);
+    unsigned dataSize = encodeDataum(vecType.getElementType());
+    auto dataum = createIntConstant(i8Type, dataSize);
+    auto trans = createIntConstant(i8Type, transpose ? 2 : 1);
+    auto base = adaptor.getTensorDesc();
+    // number of blocks(1 for now)
+    auto nBlks = createIntConstant(i8Type, 1);
+    std::string typeStr;
+    VectorType newType;
+    std::tie(typeStr, newType) = encodeVectorType(rewriter, vecType, rank == 1);
+    SmallVector<Value> args;
+    if (rank == 2) {
+      auto blockWidth = tileType.getShape()[1];
+      auto blockHeight = tileType.getShape()[0];
+      auto blockW = createIntConstant(i32Type, blockWidth);
+      auto blockH = createIntConstant(i32Type, blockHeight);
+      auto transform = createIntConstant(i8Type, vnni ? 1 : 0);
+      // static memref for now
+      auto createDescOp =
+          op.getTensorDesc().template getDefiningOp<CreateNdDescOp>();
+      auto memType = cast<MemRefType>(createDescOp.getSource().getType());
+      unsigned bitWidth = memType.getElementType().getIntOrFloatBitWidth();
+      auto surfaceWidth = memType.getShape()[1] * (bitWidth / 8) - 1;
+      auto surfaceHeight = memType.getShape()[0] - 1;
+      // pitch = width for now
+      auto surfacePitch = surfaceWidth;
+      auto surfaceW = createIntConstant(i32Type, surfaceWidth);
+      auto surfaceH = createIntConstant(i32Type, surfaceHeight);
+      auto surfaceP = createIntConstant(i32Type, surfacePitch);
+      auto createOffset = [&](unsigned idx) -> Value {
+        Value val;
+        if (ShapedType::isDynamic(createDescOp.getStaticOffsets()[idx])) {
+          val = createDescOp.getOffsets()[idx];
+          val = rewriter.create<arith::TruncIOp>(loc, i32Type, val);
+        } else {
+          val =
+              createIntConstant(i32Type, createDescOp.getStaticOffsets()[idx]);
+        }
+        return val;
+      };
+      auto offsetX = createOffset(1);
+      auto offsetY = createOffset(0);
+      args.assign({pred, l1CacheHint, l3CacheHint, dataum, trans, nBlks, blockW,
+                   blockH, transform, base, surfaceW, surfaceH, surfaceP,
+                   offsetX, offsetY});
+      if constexpr (!isLoad && !isPrefetch) {
+        args.push_back(adaptor.getValue());
+      }
+    } else if (rank == 1) {
+      auto subOpcode =
+          createIntConstant(i8Type, (isLoad || isPrefetch) ? 0 : 4);
+      auto addrScale = createIntConstant(i16Type, 1);
+      auto immOffset = createIntConstant(i32Type, 0);
+      auto dataumSize = createIntConstant(i8Type, 4);
+      int lscVecSize = 0;
+      int numElts = newType.getNumElements();
+      if (numElts <= 4) {
+        lscVecSize = numElts;
+      } else {
+        lscVecSize = log2(numElts) + 2;
+      }
+      auto vecSize = createIntConstant(i8Type, lscVecSize);
+      auto transposed = createIntConstant(i8Type, 2); // transpose
+      auto mask = createIntConstant(i8Type, 0);
+      auto surface = createIntConstant(i32Type, 0);
+      args.assign({
+          pred,
+          subOpcode,
+          l1CacheHint,
+          l3CacheHint,
+          addrScale,
+          immOffset,
+          dataumSize,
+          vecSize,
+          transposed,
+          mask,
+          base,
+      });
+      if constexpr (!isLoad && !isPrefetch) {
+        auto cast =
+            rewriter.create<spirv::BitcastOp>(loc, newType, adaptor.getValue());
+        args.push_back(cast);
+      }
+      args.push_back(surface);
+    }
+    if constexpr (!isPrefetch)
+      funcName += typeStr;
+    if constexpr (isLoad) {
+      funcName += "_i1_i64";
+      auto retType = newType;
+      auto funcType =
+          rewriter.getFunctionType(ValueRange(args).getTypes(), retType);
+      Operation *opPtr = op;
+      lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
+      auto funcOp =
+          rewriter.create<spirv::FunctionCallOp>(loc, retType, funcName, args);
+      if (rank == 2) {
+        rewriter.replaceOp(op, funcOp->getResult(0));
+      } else {
+        auto cast = rewriter.create<spirv::BitcastOp>(loc, op.getType(),
+                                                      funcOp->getResult(0));
+        rewriter.replaceOp(op, cast->getResult(0));
+      }
+    } else {
+      auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {});
+      Operation *opPtr = op;
+      lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
+      rewriter.create<spirv::FunctionCallOp>(loc, TypeRange(), funcName, args);
+      rewriter.eraseOp(op);
+    }
+    return success();
+  }
+};
+
+template <typename OpType>
+class LoadStorePrefetchNdToRawSend : public OpConversionPattern<OpType> {
+public:
+  using OpConversionPattern<OpType>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(OpType op, typename OpType::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    llvm::outs()<<"\n\nLoadStorePrefetchNdToRawSend: "<<"\n";
+    auto createDescOp =
+          op.getTensorDesc().template getDefiningOp<CreateNdDescOp>();
+    auto memoryScope = createDescOp.getMemoryScope();
+    bool usingSLM = memoryScope == xegpu::MemoryScope::SLM;
+    llvm::outs()<<"\n\nmemory_scope: "<<memoryScope<<"\n";
+
+    auto tileType = op.getTensorDesc().getType();
+    auto rank = tileType.getRank();
+    assert(rank <= 2 && "only support 1d/2d load/store/prefetch for now");
+    auto loc = op->getLoc();
+    constexpr bool isLoad = std::is_same_v<OpType, LoadNDOp>;
+    constexpr bool isPrefetch = std::is_same_v<OpType, PrefetchNDOp>;
+    auto createIntConstant = [&](Type type, unsigned value) {
+      auto attr = rewriter.getIntegerAttr(type, value);
+      return rewriter.create<spirv::ConstantOp>(loc, type, attr);
+    };
+
+    /// collect common info
+    auto i1Type = rewriter.getI1Type();
+    auto i8Type = rewriter.getI8Type();
+    auto i32Type = rewriter.getI32Type();
+    auto i64Type = rewriter.getI64Type();
+    auto vnni = false;
+    auto transpose = false;
+    if constexpr (isLoad) {
+      auto vnniValue = op.getVnniAxis();
+      vnni = vnniValue.has_value() && vnniValue.value() == 0 ? true : false;
+      auto transposeValue = op.getTranspose();
+      transpose = transposeValue.has_value() && transposeValue.value()[0] == 1
+                      ? true
+                      : false;
+    }
+    auto base = adaptor.getTensorDesc();
+    auto elmType = tileType.getElementType();
+    VectorType newType = VectorType::get(1, i32Type);
+    std::string funcName;
+    if constexpr (isPrefetch) {
+      funcName = "llvm_genx_raw_send2_noresult_i1_v8i32";
+    } else {
+      VectorType vecType;
+      if constexpr (isLoad) {
+        vecType = cast<VectorType>(op.getResult().getType());
+        funcName = "llvm_genx_raw_send2_";
+      } else {
+        vecType = cast<VectorType>(op.getValue().getType());
+        funcName = "llvm_genx_raw_sends2_noresult_i1_v8i32_";
+      }
+      std::string typeStr;
+      std::tie(typeStr, newType) =
+          encodeVectorType(rewriter, vecType);
+      funcName += typeStr;
+    }
+    unsigned cacheHint = encodeCacheHint(op);
+
+    /// fill in parameters for raw.send
+    // bit[1:0] EOT,sendc
+    auto modifier = createIntConstant(i8Type, 0);
+    auto execSize = createIntConstant(i8Type, 0);
+    auto pred = createIntConstant(i1Type, 1);
+    auto numSrc1 = createIntConstant(i8Type, 1);
+    unsigned numElem = newType.getNumElements();
+    unsigned numDstVal = (numElem / 16) < 1 ? 1: numElem / 16;
+    // if (rank == 1) {
+    //   numDstVal *= 2;
+    // }
+    auto numDst = createIntConstant(i8Type, numDstVal);
+    // 15 for ugm
+    auto sfid = usingSLM ? createIntConstant(i8Type, 14) 
+                      : createIntConstant(i8Type, 15); ;
+    auto extMsg = createIntConstant(i32Type, 0);
+    // message descriptor
+    uint32_t rawSendMsg = 0;
+    if (rank == 2) {
+      // https://gfxspecs.intel.com/Predator/Home/Index/53680
+      rawSendMsg |= (isLoad || isPrefetch) ? 3 : 7;
+      rawSendMsg |= (vnni ? 1 : 0) << 7;
+      rawSendMsg |= (encodeDataum(elmType) - 1) << 9;
+      rawSendMsg |= (transpose ? 1 : 0) << 15;
+      rawSendMsg |= cacheHint << 17;
+      rawSendMsg |= (isLoad ? numDstVal : 0) << 20;
+      rawSendMsg |= 1 << 25;
+    } else {
+      int vecSize;
+      if (numElem <= 4) {
+        vecSize = numElem - 1;
+      } else {
+        vecSize = log2(numElem) + 1;
+      }
+      // rank == 1
+      // https://gfxspecs.intel.com/Predator/Home/Index/53523
+      rawSendMsg |= (isLoad || isPrefetch) ? 0 : 4;
+      rawSendMsg |= usingSLM ? (2 << 7) : (3 << 7);
+      rawSendMsg |= 2 << 9;
+      rawSendMsg |= vecSize << 12;
+      rawSendMsg |= 1 << 15;
+      rawSendMsg |= cacheHint << 17;
+      rawSendMsg |= (isLoad ? numDstVal : 0) << 20;
+      rawSendMsg |= 1 << 25;
+    }
+    auto msg = createIntConstant(i32Type, rawSendMsg);
+    // payload
+    auto v8i32 = VectorType::get(8, i32Type);
+    auto v4i64 = VectorType::get(4, i64Type);
+    
+    auto idx0 = createIntConstant(i32Type, 0);
+    auto idx2 = createIntConstant(i32Type, 2);
+    auto idx3 = createIntConstant(i32Type, 3);
+    auto idx4 = createIntConstant(i32Type, 4);
+    auto idx5 = createIntConstant(i32Type, 5);
+    auto idx6 = createIntConstant(i32Type, 6);
+    auto idx7 = createIntConstant(i32Type, 7);
+    Value payLoad;
+    if(!usingSLM){
+      payLoad = rewriter.create<spirv::UndefOp>(loc, v4i64);
+      payLoad =
+          rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad, base, idx0);
+      payLoad = rewriter.create<spirv::BitcastOp>(loc, v8i32, payLoad);
+    } else {
+      payLoad = rewriter.create<spirv::UndefOp>(loc, v8i32);
+      payLoad =
+          rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad, base, idx0);
+    }
+    
+    if (rank == 2) {
+      auto blockWidth = tileType.getShape()[1];
+      auto blockHeight = tileType.getShape()[0];
+
+      // fixme: support memref for now
+      auto memType = cast<MemRefType>(createDescOp.getSource().getType());
+      unsigned bitWidth = memType.getElementType().getIntOrFloatBitWidth();
+      auto surfaceWidth = memType.getShape()[1] * (bitWidth / 8) - 1;
+      auto surfaceHeight = memType.getShape()[0] - 1;
+      // fixme: pitch = width for now
+      auto surfacePitch = surfaceWidth;
+      auto surfaceW = createIntConstant(i32Type, surfaceWidth);
+      auto surfaceH = createIntConstant(i32Type, surfaceHeight);
+      auto surfaceP = createIntConstant(i32Type, surfacePitch);
+      auto createOffset = [&](unsigned idx) -> Value {
+        Value val;
+        if (ShapedType::isDynamic(createDescOp.getStaticOffsets()[idx])) {
+          val = createDescOp.getOffsets()[idx];
+          val = rewriter.create<arith::TruncIOp>(loc, i32Type, val);
+        } else {
+          val =
+              createIntConstant(i32Type, createDescOp.getStaticOffsets()[idx]);
+        }
+        return val;
+      };
+      auto offsetX = createOffset(1);
+      auto offsetY = createOffset(0);
+      payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
+                                                              surfaceW, idx2);
+      payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
+                                                              surfaceH, idx3);
+      payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
+                                                              surfaceP, idx4);
+      payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
+                                                              offsetX, idx5);
+      payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
+                                                              offsetY, idx6);
+      unsigned blockVal = ((blockHeight - 1) << 8) | (blockWidth - 1);
+      auto blockInfo = createIntConstant(i32Type, blockVal);
+      payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
+                                                              blockInfo, idx7);
+    }
+    SmallVector<Value> args{modifier, execSize, pred, numSrc1, numDst,
+                            sfid,     extMsg,   msg,  payLoad};
+    if constexpr (isLoad) {
+      funcName += "_i1_v8i32";
+      auto old = rewriter.create<spirv::UndefOp>(loc, newType);
+      args.push_back(old);
+      auto retType = newType;
+      auto funcType =
+          rewriter.getFunctionType(ValueRange(args).getTypes(), retType);
+      Operation *opPtr = op;
+      lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
+      auto funcOp =
+          rewriter.create<spirv::FunctionCallOp>(loc, retType, funcName, args);
+      if (rank == 2) {
+        rewriter.replaceOp(op, funcOp->getResult(0));
+      } else {
+        auto cast = rewriter.create<spirv::BitcastOp>(loc, op.getType(),
+                                                      funcOp->getResult(0));
+        rewriter.replaceOp(op, cast->getResult(0));
+      }
+    } else {
+      if constexpr (isPrefetch)
+        args.erase(args.begin() + 4);
+      else {
+        if (rank == 2) {
+          args.push_back(adaptor.getValue());
+        } else if (rank == 1) {
+          if(adaptor.getValue().getType() != newType){
+            auto cast = rewriter.create<spirv::BitcastOp>(loc, newType,
+                                                          adaptor.getValue());
+            args.push_back(cast);
+          } else {
+            args.push_back(adaptor.getValue());
+          }
+          
+        }
+      }
+      auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {});
+      Operation *opPtr = op;
+      lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
+      rewriter.create<spirv::FunctionCallOp>(loc, TypeRange(), funcName, args);
+      rewriter.eraseOp(op);
+    }
+    return success();
+  }
+};
 
 class DpasToVCPattern : public OpConversionPattern<DpasOp> {
 public:
@@ -252,7 +629,6 @@ public:
     auto lhsType = op.getLhs().getType().cast<VectorType>();
     auto rhsType = op.getRhs().getType().cast<VectorType>();
     auto resultType = op.getResultType().cast<VectorType>();
-    unsigned rank = lhsType.getRank();
     uint8_t rc = lhsType.getShape()[0];
     uint8_t sd = lhsType.getShape()[1];
     // refer to IGC/visa/Common_ISA_util.cpp#87
@@ -268,8 +644,8 @@ public:
         return 0;
       }
     };
-    uint8_t prec1 = encodePrecision(lhsType.getElementType());
-    uint8_t prec2 = encodePrecision(rhsType.getElementType());
+    uint8_t prec1 = encodePrecision(rhsType.getElementType());
+    uint8_t prec2 = encodePrecision(lhsType.getElementType());
     unsigned infoVal = (rc << 24) | (sd << 16) | (prec2 << 8) | (prec1);
     auto infoAttr = rewriter.getIntegerAttr(rewriter.getI32Type(), infoVal);
     auto info = rewriter.create<spirv::ConstantOp>(loc, rewriter.getI32Type(),
@@ -277,40 +653,197 @@ public:
     auto newResultType = encodeVectorType(rewriter, resultType).second;
     SmallVector<Value, 4> args{adaptor.getRhs(), adaptor.getLhs(), info};
     std::string funcName = "llvm_genx_dpas_nosrc0_";
+    if (op.getAcc()) {
+      funcName = "llvm_genx_dpas2_";
+      auto i32Type = rewriter.getI32Type();
+      auto createIntConstant = [&](Type type, unsigned value) {
+        auto attr = rewriter.getIntegerAttr(type, value);
+        return rewriter.create<spirv::ConstantOp>(loc, type, attr);
+      };
+      auto prec1Arg = createIntConstant(i32Type, prec1);
+      auto prec2Arg = createIntConstant(i32Type, prec2);
+      auto sdArg = createIntConstant(i32Type, sd);
+      auto rcArg = createIntConstant(i32Type, rc);
+      auto signless = createIntConstant(i32Type, 0);
+      args.assign({adaptor.getAcc(), adaptor.getRhs(), adaptor.getLhs(),
+                   prec1Arg, prec2Arg, sdArg, rcArg, signless, signless});
+    }
     funcName += encodeVectorType(rewriter, resultType).first;
     funcName += "_";
-    funcName += encodeVectorType(rewriter, lhsType).first;
-    funcName += "_";
     funcName += encodeVectorType(rewriter, rhsType).first;
+    funcName += "_";
+    funcName += encodeVectorType(rewriter, lhsType).first;
     auto funcType =
         rewriter.getFunctionType(ValueRange(args).getTypes(), newResultType);
     Operation *opPtr = op;
     lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
-    Value funcOp = rewriter.create<spirv::FunctionCallOp>(
-      loc, 
-      ArrayRef<mlir::Type>{newResultType},
-      mlir::FlatSymbolRefAttr::get(rewriter.getContext(), funcName), 
-      ArrayRef<Value>(args)).getResults()[0];
-
+    auto funcOp = rewriter.create<spirv::FunctionCallOp>(loc, newResultType,
+                                                         funcName, args).getResults()[0];
     rewriter.replaceOp(op, funcOp);
     return success();
   }
 };
 
-Value createConstantI32(Location loc, PatternRewriter &rewriter, int32_t v) {
-  auto i32ty = rewriter.getIntegerType(32);
-  return rewriter.create<spirv::ConstantOp>(loc, i32ty,
-                                           IntegerAttr::get(i32ty, v));
-}
+template <typename OpType>
+class GatherScatterToRawSend : public OpConversionPattern<OpType> {
+public:
+  using OpConversionPattern<OpType>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(OpType op, typename OpType::Adaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto createDescOp =
+        op.getTensorDesc().template getDefiningOp<CreateDescOp>();
+    auto memoryScope = createDescOp.getMemoryScope();
+    bool usingSLM = memoryScope == xegpu::MemoryScope::SLM;
+    auto offsets = rewriter.getRemappedValue(createDescOp.getOffsets());
+    Type type = offsets.getType();
 
-#define zext(...) rewriter.create<spirv::UConvertOp>(loc, __VA_ARGS__)
-#define logic_shl(...) rewriter.create<spirv::ShiftLeftLogicalOp>(loc, __VA_ARGS__)
-#define bitwise_or(...) rewriter.create<spirv::BitwiseOrOp>(loc, __VA_ARGS__)
-#define bitwise_and(...) rewriter.create<spirv::BitwiseAndOp>(loc, __VA_ARGS__)
-#define i32_val(...) createConstantI32(loc, rewriter, __VA_ARGS__)
-#define i16_val(value) rewriter.create<spirv::ConstantOp>(loc, rewriter.getIntegerType(16), rewriter.getI16IntegerAttr(value))
-#define i8_val(value) rewriter.create<spirv::ConstantOp>(loc, rewriter.getIntegerType(8), rewriter.getI8IntegerAttr(value))
-#define i1_val(value) rewriter.create<spirv::ConstantOp>(loc, rewriter.getI1Type(), rewriter.getBoolAttr(value))
+    auto offsetType = type.dyn_cast<VectorType>();
+    auto SIMD = offsetType.getNumElements();
+
+    llvm::outs()<<"\n\nmemory_scope: "<<memoryScope<<"\n";
+    llvm::outs()<<"\n\nSIMD : "<<SIMD<<"\n";
+
+    auto tileType = op.getTensorDesc().getType();
+    auto rank = tileType.getRank();
+    assert(rank <= 2 && "only support 1d/2d for now");
+    auto loc = op->getLoc();
+    constexpr bool isLoad = std::is_same_v<OpType, LoadGatherOp>;
+    auto createIntConstant = [&](Type type, unsigned value) {
+      auto attr = rewriter.getIntegerAttr(type, value);
+      return rewriter.create<spirv::ConstantOp>(loc, type, attr);
+    };
+
+    /// collect common info
+    auto i1Type = rewriter.getI1Type();
+    auto i8Type = rewriter.getI8Type();
+    auto i32Type = rewriter.getI32Type();
+    auto i64Type = rewriter.getI64Type();
+    auto base = adaptor.getTensorDesc();
+    VectorType newType = VectorType::get(1, i32Type);
+    std::string funcName;
+    VectorType vecType;
+    uint32_t elems;
+    if constexpr (isLoad) {
+      vecType = cast<VectorType>(op.getResult().getType());
+      elems = vecType.getNumElements();
+      funcName = "llvm_genx_raw_send2_";
+    } else {
+      vecType = cast<VectorType>(op.getValue().getType());
+      elems = vecType.getNumElements();
+      funcName = "llvm_genx_raw_sends2_noresult_i1_v8i32_";
+    }
+    llvm::outs()<<"\n\nelems : "<<elems<<"\n";
+    std::string typeStr;
+    std::tie(typeStr, newType) = encodeVectorType(rewriter, vecType);
+    funcName += typeStr;
+    unsigned cacheHint = encodeCacheHint(op);
+
+    /// fill in parameters for raw.send
+    // bit[1:0] EOT,sendc
+    auto modifier = createIntConstant(i8Type, 0);
+    auto execSize =  SIMD == 16 ? createIntConstant(i8Type, 4) 
+                : createIntConstant(i8Type, 5);
+    auto pred = createIntConstant(i1Type, 1);
+    auto numSrc1 = SIMD == 16 ? createIntConstant(i8Type, 2) 
+                : createIntConstant(i8Type, 4);
+    unsigned numDstVal = newType.getNumElements() / 16;
+    auto numDst = createIntConstant(i8Type, numDstVal);
+    // 15 for ugm
+    auto sfid = usingSLM ? createIntConstant(i8Type, 14) 
+                      : createIntConstant(i8Type, 15); //to do slm
+    auto extMsg = createIntConstant(i32Type, 0);
+    auto vecSize = 0;
+    llvm::outs()<<"\n\nnumDstVal: " <<numDstVal<<"\n";
+    llvm::outs()<<"\n\nexecSize: " <<execSize<<"\n";
+    if (numDstVal <= 4) {
+      vecSize = numDstVal - 1;
+    } else {
+      vecSize = log2(numDstVal) + 1;
+    }
+    vecSize = elems / SIMD - 1;
+    llvm::outs()<<"\n\nvecSize: " <<vecSize<<"\n";
+    // message descriptor
+    uint32_t rawSendMsg = 0;
+    rawSendMsg |= (isLoad) ? 0 : 4;
+    rawSendMsg |= usingSLM ? (2 << 7) : (3 << 7); // A64 for global, A32 for slm
+    rawSendMsg |= 2 << 9; // D32
+    rawSendMsg |= vecSize << 12;
+    //rawSendMsg |= 1 << 15;
+    rawSendMsg |= cacheHint << 17;
+    rawSendMsg |= (isLoad ? numDstVal : 0) << 20;
+    rawSendMsg |= usingSLM ? ((SIMD / 16) << 25) : ((SIMD / 8) << 25);
+    auto msg = createIntConstant(i32Type, rawSendMsg);
+
+    // payload
+    auto payLoadType = usingSLM ? VectorType::get(SIMD, i32Type) 
+              : VectorType::get(SIMD, i64Type);
+    Value payLoad = rewriter.create<spirv::UndefOp>(loc, payLoadType);
+    auto idx0 = createIntConstant(i32Type, 0);
+    if(usingSLM){
+      base = rewriter.create<UnrealizedConversionCastOp>(loc, i32Type, base).getResult(0);
+    }
+    payLoad =
+        rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad, base, idx0);
+
+    if(SIMD == 16){
+      SmallVector<int32_t, 16> indices(16, 0);
+      payLoad = rewriter.create<spirv::VectorShuffleOp>(
+          loc, payLoadType, payLoad, payLoad, rewriter.getI32ArrayAttr(indices));
+    } else if(SIMD == 32) {
+      SmallVector<int32_t, 32> indices(32, 0);
+      payLoad = rewriter.create<spirv::VectorShuffleOp>(
+          loc, payLoadType, payLoad, payLoad, rewriter.getI32ArrayAttr(indices));
+    }
+
+    Value dataSize = i64_val(4);
+    Value dataSizes = rewriter.create<vector::SplatOp>(loc, payLoadType, dataSize);
+    if(!usingSLM){
+      offsets = rewriter.create<spirv::UConvertOp>(loc, payLoadType, offsets);
+    }
+    offsets = rewriter.create<spirv::IMulOp>(loc, payLoadType, offsets, dataSizes);
+    payLoad = rewriter.create<spirv::IAddOp>(loc, payLoadType, payLoad, offsets);
+    llvm::outs()<<"\n\nbase: "<<base<<"\n";
+    llvm::outs()<<"\n\npayload: "<<payLoad<<"\n";
+    
+    SmallVector<Value> args{modifier, execSize, pred, numSrc1, numDst,
+                            sfid,     extMsg,   msg,  payLoad};
+    if constexpr (isLoad) {
+      funcName += usingSLM ? "_i1_v32i32" : "_i1_v32i64";
+      auto old = rewriter.create<spirv::UndefOp>(loc, newType);
+      args.push_back(old);
+      auto retType = newType;
+      auto funcType =
+          rewriter.getFunctionType(ValueRange(args).getTypes(), retType);
+      Operation *opPtr = op;
+      lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
+      Value data =
+          rewriter.create<spirv::FunctionCallOp>(loc, retType, funcName, args).getResult(0);
+      
+      auto castTy = this->getTypeConverter()->convertType(op.getType());
+      if(data.getType() != castTy){
+        data = rewriter.create<spirv::BitcastOp>(loc, castTy, data);
+      }
+      rewriter.replaceOp(op, data);
+    } else {
+      Value data = adaptor.getValue();
+      if (data.getType() != newType) {
+        data = rewriter.create<spirv::BitcastOp>(loc, newType, data);
+      }
+      args.push_back(data);
+      auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {});
+      Operation *opPtr = op;
+      lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
+      rewriter.create<spirv::FunctionCallOp>(loc, TypeRange(), funcName, args);
+      rewriter.eraseOp(op);
+    }
+    llvm::outs()<<"\n\nAfter GatherScatterToRawSend\n";
+    // Operation *opPtr = op;
+    // auto mod = opPtr->getParentOfType<mlir::ModuleOp>();
+    // mod->print(llvm::outs());
+    return success();
+  }
+};
 
 class AllocNbarrierToVCPattern : public OpConversionPattern<AllocNbarrierOp> {
 public:
@@ -318,20 +851,24 @@ public:
   LogicalResult
   matchAndRewrite(AllocNbarrierOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    auto nbarrier_count = op.getNbarrierCount();
+    Value nbarrier_count = op.getNbarrierCount();
     auto countOp = nbarrier_count.getDefiningOp<arith::ConstantOp>();
-    int32_t count = countOp.getValue().cast<IntegerAttr>().getValue().getZExtValue();
+    auto value = countOp.getValue().cast<IntegerAttr>();
+    int32_t count = value.getValue().getZExtValue();
+    llvm::outs()<<"\n\ncount: "<<count<<"\n";
 
-    spirv::ModuleOp sprivModule = op->getParentOfType<spirv::ModuleOp>();
+    ModuleOp sprivModule = op->getParentOfType<ModuleOp>();
 
-    sprivModule.walk([&](spirv::FuncOp funcOp){
-      auto spirvModule = funcOp->getParentOfType<spirv::ModuleOp>();
-      rewriter.setInsertionPointToEnd(spirvModule.getBody());
+    // llvm::outs()<<"\n\nsprivModule: "<<sprivModule<<"\n";
 
-      rewriter.create<spirv::ExecutionModeOp>(funcOp.getLoc(), funcOp,
-                                        spirv::ExecutionMode::NamedBarrierCountINTEL,
-                                        count);
-    });
+    // sprivModule.walk([&](spirv::FuncOp funcOp){
+    //   auto spirvModule = funcOp->getParentOfType<ModuleOp>();
+    //   rewriter.setInsertionPointToEnd(spirvModule.getBody());
+
+    //   rewriter.create<spirv::ExecutionModeOp>(funcOp.getLoc(), funcOp,
+    //                                     spirv::ExecutionMode::NamedBarrierCountINTEL,
+    //                                     count);
+    // });
 
     rewriter.eraseOp(op);
     return success();
@@ -527,32 +1064,32 @@ public:
   LogicalResult
   matchAndRewrite(CreateDescOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    llvm::outs() << "\n\nCreateDescOpToVCPattern: ";
+    llvm::outs() << "\nCreateDescOpToVCPattern: \n";
     auto loc = op.getLoc();
     auto src = adaptor.getSource();
-    llvm::outs()<<"\n\nCreateDescOpToVCPattern src.getDefiningOp(): "<<*src.getDefiningOp()<<"\n";
-    // if(auto castOp = dyn_cast_or_null<UnrealizedConversionCastOp>(src.getDefiningOp())){
-    //   auto i64Type = rewriter.getI64Type();
-    //   Value smemBase = rewriter.create<spirv::ConstantOp>(loc, i64Type,
-    //                                        IntegerAttr::get(i64Type, 0));
-    //   rewriter.replaceOp(op, smemBase);
-    //   return success();
-    // }
 
-    Value baseAddr = rewriter.create<spirv::ConvertPtrToUOp>(loc, 
+    Value baseAddr;
+    Type type = src.getType();
+    if(isa<mlir::IntegerType>(type)){
+      baseAddr = src;
+    }else{
+      baseAddr = rewriter.create<spirv::ConvertPtrToUOp>(loc, 
               rewriter.getI64Type(), adaptor.getSource()).getResult();
-    
-    auto offset = adaptor.getOffsets();
-    llvm::outs()<<"\n\nop: "<<op<<"\n";
+    }
 
-    //todo genereate the desc
-    llvm::outs()<<"\n\nadaptor.getBaseAddr(): "<<adaptor.getSource()<<"\n";
-    llvm::outs()<<"\n\nbaseAddr: "<<baseAddr<<"\n";
     rewriter.replaceOp(op, baseAddr);
-    llvm::outs()<<"\n\nreturn success()\n";
-    // Operation *opPtr = op;
-    // auto mod = op->getParentOfType<ModuleOp>();
-    // mod->print(llvm::outs());
+    return success();
+  }
+};
+
+class ExpOpToVCPattern : public OpConversionPattern<spirv::CLExpOp> {
+public:
+  using OpConversionPattern<spirv::CLExpOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(spirv::CLExpOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    llvm::outs() << "\nExpOpToVCPattern: \n";
+
     return success();
   }
 };
@@ -567,16 +1104,17 @@ public:
     auto loc = op.getLoc();
     auto result = op.getODSResults(0)[0];
 
+    auto src = adaptor.getTensorDesc();
+    llvm::outs()<<"\n\nsrc: "<<src<<"\n";
+    Type type = src.getType();
+
     auto cerate_desc_op = dyn_cast_or_null<CreateDescOp>(op.getTensorDesc().getDefiningOp());
-    Value baseAddr = rewriter.create<UnrealizedConversionCastOp>(loc, rewriter.getI64Type(), adaptor.getTensorDesc()).getResult(0);
-    auto offset = cerate_desc_op.getOffsets();
+
+    Value offsets = cerate_desc_op.getOffsets();
     auto vecType = result.getType().dyn_cast<mlir::VectorType>();
     auto shape = vecType.getShape();
     auto memoryScope = cerate_desc_op.getMemoryScope();
-    llvm::outs()<<"\n\nvecType: "<<vecType<<"\n";
-    llvm::outs()<<"\n\nbaseAddr: "<<baseAddr<<"\n";
-    llvm::outs()<<"\n\nmemoryScope: "<<memoryScope<<"\n";
-    llvm::outs()<<"\n\nshape[0]: "<<shape[0]<<"\n";
+    llvm::outs()<<"\n\noffsets: "<<offsets<<"\n";
 
     Value vectorSize = i32_val(log2(shape[0]));
     if(memoryScope == xegpu::MemoryScope::SLM){
@@ -584,10 +1122,11 @@ public:
       funcName += encodeVectorType(rewriter, vecType, false).first;
       funcName += "_i1_i64";
       llvm::outs() << "\n\nLoadGatherOpToVCPattern funcName: " << funcName << "\n";
+      Value baseAddr = rewriter.create<UnrealizedConversionCastOp>(loc, rewriter.getI32Type(), adaptor.getTensorDesc()).getResult(0);
+      Value offset = rewriter.create<spirv::VectorExtractDynamicOp>(loc, rewriter.getI32Type(), offsets, i32_val(0));
+      Value addr = rewriter.create<spirv::IAddOp>(loc, rewriter.getI32Type(), baseAddr, offset);
 
-      //%true, %uchar_0, %uchar_0, %uchar_0, %ushort_1, %uint_0, %uchar_3, %uchar_7, %uchar_2, %uchar_0, %arg_2, %uint_0
-      
-      SmallVector<Value> args{i1_val(1), i8_val(0), i8_val(0), i8_val(0), i16_val(1), i32_val(0), i8_val(3), vectorSize, i8_val(2), i8_val(0), baseAddr ,i8_val(0)};
+      SmallVector<Value> args{i1_val(1), i8_val(0), i8_val(0), i8_val(0), i16_val(1), i32_val(0), i8_val(3), i8_val(7), i8_val(2), i8_val(0), baseAddr ,i32_val(0)};
       auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {vecType});
 
       Operation *opPtr = op;
@@ -605,8 +1144,8 @@ public:
       funcName += "_i1_i64";
       llvm::outs() << "\n\nLoadGatherOpToVCPattern funcName: " << funcName << "\n";
 
-      //%true, %uchar_0, %uchar_0, %uchar_0, %ushort_1, %uint_0, %uchar_3, %uchar_7, %uchar_2, %uchar_0, %arg_2, %uint_0
-      SmallVector<Value> args{i1_val(1), i8_val(0), i8_val(0), i8_val(0), i16_val(1), i32_val(0), i8_val(3), vectorSize, i8_val(2), i8_val(0), baseAddr ,i8_val(0)};
+      Value baseAddr = rewriter.create<UnrealizedConversionCastOp>(loc, rewriter.getI64Type(), adaptor.getTensorDesc()).getResult(0);
+      SmallVector<Value> args{i1_val(1), i8_val(0), i8_val(0), i8_val(0), i16_val(1), i32_val(0), i8_val(3), i8_val(7), i8_val(2), i8_val(0), baseAddr ,i32_val(0)};
       auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {vecType});
 
       Operation *opPtr = op;
@@ -635,26 +1174,21 @@ public:
     auto value = adaptor.getValue();
 
     auto cerate_desc_op = dyn_cast_or_null<CreateDescOp>(op.getTensorDesc().getDefiningOp());
-    Value baseAddr = rewriter.create<UnrealizedConversionCastOp>(loc, rewriter.getI64Type(), adaptor.getTensorDesc()).getResult(0);
-    auto offset = cerate_desc_op.getOffsets();
+    //auto offsets = cerate_desc_op.getOffsets().Value;
     auto vecType = value.getType().dyn_cast<mlir::VectorType>();
     auto shape = vecType.getShape();
     auto memoryScope = cerate_desc_op.getMemoryScope();
 
-    llvm::outs()<<"\n\nvecType: "<<vecType<<"\n";
-    llvm::outs()<<"\n\nbaseAddr: "<<baseAddr<<"\n";
-    llvm::outs()<<"\n\nmemoryScope: "<<memoryScope<<"\n";
-    llvm::outs()<<"\n\nshape[0]: "<<shape[0]<<"\n";
-
     Value vectorSize = i32_val(log2(shape[0]));
     if(memoryScope == xegpu::MemoryScope::SLM){
-      std::string funcName = "llvm_genx_lsc_store_slm_";
+      std::string funcName = "llvm_genx_lsc_store_slm_i1_i64_";
       funcName += encodeVectorType(rewriter, vecType, false).first;
-      funcName += "_i1_i64";
-      llvm::outs() << "\n\nLoadGatherOpToVCPattern funcName: " << funcName << "\n";
+      llvm::outs() << "\n\nStoreGatherOpToVCPattern funcName: " << funcName << "\n";
 
-      //%true, %uchar_4, %uchar_0, %uchar_0, %ushort_1, %uint_0, %uchar_3, %uchar_8, %uchar_2, %uchar_0, %arg_0, %dpas_result, %uint_0) : (i1, i8, i8, i8, i16, i32, i8, i8, i8, i8, i64, vector<64 x f32>, i32
-      SmallVector<Value> args{i1_val(1), i8_val(0), i8_val(0), i8_val(0), i16_val(1), i32_val(0), i8_val(3), vectorSize, i8_val(2), i8_val(0), baseAddr, value, i8_val(0)};
+      Value baseAddr = rewriter.create<UnrealizedConversionCastOp>(loc, rewriter.getI32Type(), adaptor.getTensorDesc()).getResult(0);
+      // Value offset = rewriter.create<spirv::VectorExtractDynamicOp>(loc, rewriter.getI32Type(), offsets, i32_val(0));
+      // Value addr = rewriter.create<spirv::IAddOp>(loc, rewriter.getI32Type(), baseAddr, offset);
+      SmallVector<Value> args{i1_val(1), i8_val(4), i8_val(0), i8_val(0), i16_val(1), i32_val(0), i8_val(3), i8_val(2), i8_val(2), i8_val(0), baseAddr, value, i32_val(0)};
       auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {});
 
       Operation *opPtr = op;
@@ -664,13 +1198,12 @@ public:
                                                             funcName, args);
       rewriter.eraseOp(op);
     } else {
-      std::string funcName = "llvm_genx_lsc_store_stateless_";
+      std::string funcName = "llvm_genx_lsc_store_stateless_i1_i64_";
       funcName += encodeVectorType(rewriter,vecType,false).first;
-      funcName += "_i1_i64";
-      llvm::outs() << "\n\nLoadGatherOpToVCPattern funcName: " << funcName << "\n";
+      llvm::outs() << "\n\nStoreGatherOpToVCPattern funcName: " << funcName << "\n";
 
-      //%true, %uchar_4, %uchar_0, %uchar_0, %ushort_1, %uint_0, %uchar_3, %uchar_8, %uchar_2, %uchar_0, %arg_0, %dpas_result, %uint_0) : (i1, i8, i8, i8, i16, i32, i8, i8, i8, i8, i64, vector<64 x f32>, i32
-      SmallVector<Value> args{i1_val(1), i8_val(4), i8_val(0), i8_val(0), i16_val(1), i32_val(0), i8_val(3), vectorSize, i8_val(2), i8_val(0), baseAddr, value, i8_val(0)};
+      Value baseAddr = rewriter.create<UnrealizedConversionCastOp>(loc, rewriter.getI64Type(), adaptor.getTensorDesc()).getResult(0);
+      SmallVector<Value> args{i1_val(1), i8_val(4), i8_val(0), i8_val(0), i16_val(1), i32_val(0), i8_val(3), i8_val(7), i8_val(2), i8_val(0), baseAddr, value, i32_val(0)};
       auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {});
 
       Operation *opPtr = op;
@@ -685,6 +1218,51 @@ public:
   }
 };
 
+class AllocaOpToVCPattern : public OpConversionPattern<memref::AllocaOp> {
+public:
+  using OpConversionPattern<memref::AllocaOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(memref::AllocaOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
+    
+    MemRefType allocType = op.getType();
+    Type spirvType = getTypeConverter()->convertType(allocType);
+
+    Operation *parent =
+      SymbolTable::getNearestSymbolTable(op->getParentOp());
+    spirv::GlobalVariableOp varOp;
+    {
+      OpBuilder::InsertionGuard guard(rewriter);
+      Block &entryBlock = *parent->getRegion(0).begin();
+      rewriter.setInsertionPointToStart(&entryBlock);
+      auto varOps = entryBlock.getOps<spirv::GlobalVariableOp>();
+      std::string varName =
+        std::string("__workgroup_mem__") +
+        std::to_string(std::distance(varOps.begin(), varOps.end()));
+      varOp = rewriter.create<spirv::GlobalVariableOp>(loc, spirvType, varName,
+                                                      /*initializer=*/nullptr);
+    }
+    Value ret = rewriter.create<spirv::AddressOfOp>(loc, varOp);
+    rewriter.replaceOp(op, ret);
+
+    return success();
+  }
+};
+
+// class ExpOpToVCPattern : public OpConversionPattern<mlir::math::ExpOp> {
+// public:
+//   using OpConversionPattern<mlir::math::ExpOp>::OpConversionPattern;
+//   LogicalResult
+//   matchAndRewrite(mlir::math::ExpOp op, OpAdaptor adaptor,
+//                   ConversionPatternRewriter &rewriter) const override {
+//     auto loc = op.getLoc();
+
+//     auto ret = rewriter.create<spirv::CLExpOp>(loc, elemTy, operands[0]);
+//     return success();
+//   }
+// };
+
 void populateXeGPUToVCIntrinsicsPatterns(
     SPIRVTypeConverter &typeConverter, RewritePatternSet &patterns) {
   llvm::outs()<<"\n\npopulateXeGPUToVCIntrinsicsPatterns\n";
@@ -692,7 +1270,27 @@ void populateXeGPUToVCIntrinsicsPatterns(
                AllocNbarrierToVCPattern, CreateNbarrierToVCPattern,
                NbarrierArriveToVCPattern, NbarrierWaitToVCPattern,
                CompilerHintToVCPattern, MfenceToVCPattern, 
-               CreateDescOpToVCPattern, LoadGatherOpToVCPattern,
-               StoreScatterOpToVCPattern>(
+               CreateDescOpToVCPattern, AllocaOpToVCPattern,
+               CreateNdDescToVCPattern,
+               //LoadGatherOpToVCPattern, StoreScatterOpToVCPattern, 
+               GatherScatterToRawSend<LoadGatherOp>,
+               GatherScatterToRawSend<StoreScatterOp>>(
       typeConverter, patterns.getContext());
+
+  // math function
+  patterns.add<ExpOpToVCPattern>(
+      typeConverter, patterns.getContext());
+
+  if (getenv("IMEX_NOT_PREFER_RAWSEND")){
+    patterns.add<LoadStorePrefetchNdToLsc<LoadNDOp>,
+                 LoadStorePrefetchNdToLsc<StoreNDOp>,
+                 LoadStorePrefetchNdToLsc<PrefetchNDOp>>(typeConverter,
+                                                         patterns.getContext());
+  }
+  else {
+    patterns.add<LoadStorePrefetchNdToRawSend<LoadNDOp>,
+                 LoadStorePrefetchNdToRawSend<StoreNDOp>,
+                 LoadStorePrefetchNdToRawSend<PrefetchNDOp>>(
+        typeConverter, patterns.getContext());
+  }
 }
