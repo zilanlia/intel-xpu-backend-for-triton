@@ -72,6 +72,10 @@ public:
     addIllegalDialect<::mlir::memref::MemRefDialect>();
     addLegalDialect<spirv::SPIRVDialect>();
     addLegalOp<UnrealizedConversionCastOp>();
+
+    //vc-backend do not support spirv::CL extension
+    addIllegalOp<spirv::CLExpOp>();
+    addIllegalOp<spirv::CLFMaxOp>();
   }
 };
 

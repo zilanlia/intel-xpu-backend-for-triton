@@ -73,6 +73,12 @@ encodeVectorType(ConversionPatternRewriter &rewriter, VectorType type,
   case 2:
     str += "v2";
     break;
+  case 4:
+    str += "v4";
+    break;
+  case 8:
+    str += "v8";
+    break;
   case 16:
     str += "v16";
     break;
@@ -217,11 +223,10 @@ public:
                   ConversionPatternRewriter &rewriter) const override {
     auto src = adaptor.getSource();
     Type type = src.getType();
-    // auto i64Type = rewriter.getIntegerType(64);
-    llvm::outs()<<"\n\nCreateNdDescToVCPattern Type: "<<type<<"\n";
+    // llvm::outs()<<"\n\nCreateNdDescToVCPattern Type: "<<type<<"\n";
     if(isa<mlir::IntegerType>(type)){
       rewriter.replaceOp(op, src);
-      llvm::outs()<<"\n\nCreateNdDescToVCPattern Type isa<mlir::IntegerType>\n";
+      // llvm::outs()<<"\n\nCreateNdDescToVCPattern Type isa<mlir::IntegerType>\n";
     }else{
       rewriter.replaceOpWithNewOp<spirv::ConvertPtrToUOp>(
           op, rewriter.getI64Type(), adaptor.getSource());
@@ -701,8 +706,8 @@ public:
     auto offsetType = type.dyn_cast<VectorType>();
     auto SIMD = offsetType.getNumElements();
 
-    llvm::outs()<<"\n\nmemory_scope: "<<memoryScope<<"\n";
-    llvm::outs()<<"\n\nSIMD : "<<SIMD<<"\n";
+    // llvm::outs()<<"\n\nmemory_scope: "<<memoryScope<<"\n";
+    // llvm::outs()<<"\n\nSIMD : "<<SIMD<<"\n";
 
     auto tileType = op.getTensorDesc().getType();
     auto rank = tileType.getRank();
@@ -733,7 +738,7 @@ public:
       elems = vecType.getNumElements();
       funcName = "llvm_genx_raw_sends2_noresult_i1_v8i32_";
     }
-    llvm::outs()<<"\n\nelems : "<<elems<<"\n";
+    // llvm::outs()<<"\n\nelems : "<<elems<<"\n";
     std::string typeStr;
     std::tie(typeStr, newType) = encodeVectorType(rewriter, vecType);
     funcName += typeStr;
@@ -754,15 +759,15 @@ public:
                       : createIntConstant(i8Type, 15); //to do slm
     auto extMsg = createIntConstant(i32Type, 0);
     auto vecSize = 0;
-    llvm::outs()<<"\n\nnumDstVal: " <<numDstVal<<"\n";
-    llvm::outs()<<"\n\nexecSize: " <<execSize<<"\n";
+    // llvm::outs()<<"\n\nnumDstVal: " <<numDstVal<<"\n";
+    // llvm::outs()<<"\n\nexecSize: " <<execSize<<"\n";
     if (numDstVal <= 4) {
       vecSize = numDstVal - 1;
     } else {
       vecSize = log2(numDstVal) + 1;
     }
     vecSize = elems / SIMD - 1;
-    llvm::outs()<<"\n\nvecSize: " <<vecSize<<"\n";
+    // llvm::outs()<<"\n\nvecSize: " <<vecSize<<"\n";
     // message descriptor
     uint32_t rawSendMsg = 0;
     rawSendMsg |= (isLoad) ? 0 : 4;
@@ -803,9 +808,9 @@ public:
     }
     offsets = rewriter.create<spirv::IMulOp>(loc, payLoadType, offsets, dataSizes);
     payLoad = rewriter.create<spirv::IAddOp>(loc, payLoadType, payLoad, offsets);
-    llvm::outs()<<"\n\nbase: "<<base<<"\n";
-    llvm::outs()<<"\n\npayload: "<<payLoad<<"\n";
-    
+    // llvm::outs()<<"\n\nbase: "<<base<<"\n";
+    // llvm::outs()<<"\n\npayload: "<<payLoad<<"\n";
+
     SmallVector<Value> args{modifier, execSize, pred, numSrc1, numDst,
                             sfid,     extMsg,   msg,  payLoad};
     if constexpr (isLoad) {
@@ -837,7 +842,7 @@ public:
       rewriter.create<spirv::FunctionCallOp>(loc, TypeRange(), funcName, args);
       rewriter.eraseOp(op);
     }
-    llvm::outs()<<"\n\nAfter GatherScatterToRawSend\n";
+    // llvm::outs()<<"\n\nAfter GatherScatterToRawSend\n";
     // Operation *opPtr = op;
     // auto mod = opPtr->getParentOfType<mlir::ModuleOp>();
     // mod->print(llvm::outs());
@@ -1003,7 +1008,6 @@ public:
   }
 };
 
-
 class MfenceToVCPattern : public OpConversionPattern<MfenceOp> {
 public:
   using OpConversionPattern<MfenceOp>::OpConversionPattern;
@@ -1064,7 +1068,7 @@ public:
   LogicalResult
   matchAndRewrite(CreateDescOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    llvm::outs() << "\nCreateDescOpToVCPattern: \n";
+    //llvm::outs() << "\nCreateDescOpToVCPattern: \n";
     auto loc = op.getLoc();
     auto src = adaptor.getSource();
 
@@ -1088,7 +1092,83 @@ public:
   LogicalResult
   matchAndRewrite(spirv::CLExpOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    auto loc = op.getLoc();
     llvm::outs() << "\nExpOpToVCPattern: \n";
+    VectorType vecType = op.getResult().getType().cast<VectorType>();
+    Type elemType = vecType.getElementType();
+    auto src = adaptor.getOperand();
+    llvm::outs()<<"\n\nExpOpToVCPattern vecType: "<<vecType<<"\n";
+
+    Type f32Type = rewriter.getF32Type();
+    Type f64Type = rewriter.getF32Type();
+    Type i32Type = rewriter.getI32Type();
+
+    Value log2eConst;
+    if(elemType == f32Type){
+      float log2e = 1.44269504089f;
+      log2eConst = rewriter.create<spirv::ConstantOp>(loc, f32Type, rewriter.getF32FloatAttr(log2e));
+    } else if(elemType == f64Type){
+      //todo
+    }
+
+    Value log2eVec = rewriter.create<spirv::UndefOp>(loc, vecType);
+    auto idx0 = rewriter.create<spirv::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(0));
+    log2eVec =
+        rewriter.create<spirv::VectorInsertDynamicOp>(loc, log2eVec, log2eConst, idx0);
+    SmallVector<int32_t, 32> indices(32, 0);
+    log2eVec = rewriter.create<spirv::VectorShuffleOp>(
+          loc, vecType, log2eVec, log2eVec, rewriter.getI32ArrayAttr(indices));
+
+    //log2(e) * x
+    auto log2eX = rewriter.create<spirv::FMulOp>(loc, vecType, src, log2eVec);
+
+    std::string funcName = "llvm.genx.exp.";
+    funcName += encodeVectorType(rewriter, vecType, false).first;
+    SmallVector<Value> args{log2eX};
+    auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {vecType});
+
+    Operation *opPtr = op;
+    lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
+
+    auto expBase2 = rewriter.create<spirv::FunctionCallOp>(loc, ArrayRef<mlir::Type>{vecType},
+                                                            funcName, args).getResults()[0];
+
+    rewriter.replaceOp(op, expBase2);
+    return success();
+  }
+};
+
+class FMaxOpToVCPattern : public OpConversionPattern<spirv::CLFMaxOp> {
+public:
+  using OpConversionPattern<spirv::CLFMaxOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(spirv::CLFMaxOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    llvm::outs() << "\nFMaxOpToVCPattern: \n";
+    auto loc = op.getLoc();
+    auto type = op.getResult().getType();
+    //  process v1
+    if(!type.isa<VectorType>()){
+      return success();
+    }
+
+    VectorType vecType = op.getResult().getType().cast<VectorType>();
+    Type elemType = vecType.getElementType();
+    auto lhs = adaptor.getLhs();
+    auto rhs = adaptor.getRhs();
+
+    std::string funcName = "llvm.genx.fmax.";
+    funcName += encodeVectorType(rewriter, vecType, false).first;
+    SmallVector<Value> args{lhs, rhs};
+    auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {vecType});
+
+    Operation *opPtr = op;
+    lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
+
+    auto ret = rewriter.create<spirv::FunctionCallOp>(loc, ArrayRef<mlir::Type>{vecType},
+                                                            funcName, args).getResults()[0];
+    llvm::outs() << "\nFMaxOpToVCPattern ret: \n" << ret << "\n";
+    rewriter.replaceOp(op, ret);
 
     return success();
   }
@@ -1250,19 +1330,6 @@ public:
   }
 };
 
-// class ExpOpToVCPattern : public OpConversionPattern<mlir::math::ExpOp> {
-// public:
-//   using OpConversionPattern<mlir::math::ExpOp>::OpConversionPattern;
-//   LogicalResult
-//   matchAndRewrite(mlir::math::ExpOp op, OpAdaptor adaptor,
-//                   ConversionPatternRewriter &rewriter) const override {
-//     auto loc = op.getLoc();
-
-//     auto ret = rewriter.create<spirv::CLExpOp>(loc, elemTy, operands[0]);
-//     return success();
-//   }
-// };
-
 void populateXeGPUToVCIntrinsicsPatterns(
     SPIRVTypeConverter &typeConverter, RewritePatternSet &patterns) {
   llvm::outs()<<"\n\npopulateXeGPUToVCIntrinsicsPatterns\n";
@@ -1278,7 +1345,7 @@ void populateXeGPUToVCIntrinsicsPatterns(
       typeConverter, patterns.getContext());
 
   // math function
-  patterns.add<ExpOpToVCPattern>(
+  patterns.add<ExpOpToVCPattern, FMaxOpToVCPattern>(
       typeConverter, patterns.getContext());
 
   if (getenv("IMEX_NOT_PREFER_RAWSEND")){
