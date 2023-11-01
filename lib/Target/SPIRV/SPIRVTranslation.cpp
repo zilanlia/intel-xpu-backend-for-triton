@@ -530,7 +530,7 @@ std::string translateXeGPUToSPIRVIR(mlir::ModuleOp module,
   // context.allowUnregisteredDialects(1);
 
   // const mlir::ParserConfig config(&context);
-  // std::string filePath = "/home/triton-xpu/python/dumpIR/test.mlir";
+  // std::string filePath = "/home/triton-xpu/python/_dumpIR/test.mlir";
 
   // std::ifstream fileStream(filePath);
   // if (!fileStream.is_open()) {

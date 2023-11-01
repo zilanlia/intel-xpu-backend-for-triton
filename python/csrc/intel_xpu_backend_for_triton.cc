@@ -324,6 +324,10 @@ void init_triton_translation(py::module &m) {
            [](mlir::PassManager &self) {
              self.addPass(mlir::createTritonGPURemoveLayoutConversionsPass());
            })
+      .def("add_tritongpu_layout_propagation_pass",
+           [](mlir::PassManager &self) {
+             self.addPass(mlir::createTritonGPULayoutPropagationPass());
+           })
       .def("add_tritongpu_reorder_instructions_pass",
            [](mlir::PassManager &self) {
              self.addPass(mlir::createTritonGPUReorderInstructionsPass());

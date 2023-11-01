@@ -62,7 +62,7 @@ public:
 
 class XeGPUSPIRVConversionTarget : public ConversionTarget {
 public:
-  explicit XeGPUSPIRVConversionTarget(MLIRContext &ctx, SPIRVTypeConverter& typeConverter)
+  explicit XeGPUSPIRVConversionTarget(MLIRContext &ctx, XeGPUToSPIRVTypeConverter& typeConverter)
           : ConversionTarget(ctx) {
 
     addIllegalDialect<triton::xegpu::XeGPUDialect>();
@@ -76,6 +76,24 @@ public:
     //vc-backend do not support spirv::CL extension
     addIllegalOp<spirv::CLExpOp>();
     addIllegalOp<spirv::CLFMaxOp>();
+    addIllegalOp<spirv::FConvertOp>();
+
+    addDynamicallyLegalOp<spirv::ConstantOp>([](spirv::ConstantOp op) -> bool {
+      ::mlir::Attribute value = op.getValue();
+      
+      if(DenseElementsAttr denseValue = dyn_cast<DenseElementsAttr>(value)){
+        Type type = denseValue.getType();
+
+        if(auto vectorType = type.cast<VectorType>()){
+          auto shape = vectorType.getShape();
+          // convert 2d constatn val to 1D to avoid error for spirv
+          if(shape.size() >= 2){
+            return false;
+          }
+        }
+      }
+      return true;
+    });
   }
 };
 
@@ -102,9 +120,27 @@ struct FuncOpConversion : public OpConversionPattern<mlir::gpu::GPUFuncOp> {
 
     int num_inputs = fnType.getNumInputs();
 
+    mlir::MLIRContext *context = funcOp.getContext();
+    spirv::Capability caps_opencl[1];
+    spirv::Extension exts_opencl[1];
+    auto triple = spirv::VerCapExtAttr::get(
+          spirv::Version::V_1_4, caps_opencl, exts_opencl, context);
+    auto targetAttr = spirv::TargetEnvAttr::get(
+          triple, spirv::getDefaultResourceLimits(context),
+          spirv::ClientAPI::OpenCL,
+          spirv::Vendor::Unknown,
+          spirv::DeviceType::Unknown,
+          spirv::TargetEnvAttr::kUnknownDeviceID);
+
+    mlir::SPIRVConversionOptions options;
+    options.use64bitIndex = true;
+    XeGPUToSPIRVTypeConverter xeGPUtypeConverter(targetAttr, options);
+
     TypeConverter::SignatureConversion signatureConverter(num_inputs);
     for (const auto &argType : enumerate(fnType.getInputs())) {
-      auto convertedType = getTypeConverter()->convertType(argType.value());
+      // llvm::outs() << "\n\nFuncOp argType.value(): "<<argType.value();
+      auto convertedType = xeGPUtypeConverter.convertType(argType.value());
+      // llvm::outs() << "\n\nFuncOp convertedType: "<<convertedType;
       if (!convertedType)
         return failure();
       signatureConverter.addInputs(argType.index(), convertedType);
@@ -112,7 +148,7 @@ struct FuncOpConversion : public OpConversionPattern<mlir::gpu::GPUFuncOp> {
 
     Type resultType;
     if (fnType.getNumResults() == 1) {
-      resultType = getTypeConverter()->convertType(fnType.getResult(0));
+      resultType = xeGPUtypeConverter.convertType(fnType.getResult(0));
       if (!resultType)
         return failure();
     }
@@ -157,10 +193,7 @@ private:
   int numWarps{0};
 };
 
-/// Pass to lower GPU Dialect to SPIR-V. The pass only converts the gpu.func ops
-/// inside gpu.module ops. i.e., the function that are referenced in
-/// gpu.launch_func ops. For each such function
-///
+/// Pass to lower XeGPU Dialect to SPIR-V. 
 /// 1) Create a spirv::ModuleOp, and clone the function into spirv::ModuleOp
 /// (the original function is still needed by the gpu::LaunchKernelOp, so cannot
 /// replace it).
@@ -204,7 +237,7 @@ void GPUXToSPIRVPass::runOnOperation() {
             spirv::Capability::VectorAnyINTEL
   };
   spirv::Extension exts_opencl[] = {
-          spirv::Extension::SPV_EXT_shader_atomic_float_add,
+          // spirv::Extension::SPV_EXT_shader_atomic_float_add,
           spirv::Extension::SPV_KHR_expect_assume,
           spirv::Extension::SPV_INTEL_vector_compute};
   auto triple = spirv::VerCapExtAttr::get(
@@ -216,34 +249,15 @@ void GPUXToSPIRVPass::runOnOperation() {
           spirv::DeviceType::Unknown,
           spirv::TargetEnvAttr::kUnknownDeviceID);
 
-  //gpuModule->setAttr(spirv::getTargetEnvAttrName(), targetAttr);
-
-
   {
-    // Map MemRef memory space to SPIR-V storage class first if requested.
-    if (mapMemorySpace) {
-      std::unique_ptr<mlir::ConversionTarget> target =
-          mlir::spirv::getMemorySpaceToStorageClassTarget(*context);
-      mlir::spirv::MemorySpaceToStorageClassMap memorySpaceMap =
-          mlir::spirv::mapMemorySpaceToOpenCLStorageClass;
-      mlir::spirv::MemorySpaceToStorageClassConverter converter(memorySpaceMap);
-
-      mlir::RewritePatternSet patterns(context);
-      mlir::spirv::populateMemorySpaceToStorageClassPatterns(converter,
-                                                             patterns);
-
-      if (failed(applyFullConversion(gpuModule, *target, std::move(patterns))))
-        return signalPassFailure();
-    }
-
-    auto targetAttr = mlir::spirv::lookupTargetEnvOrDefault(gpuModule);
+    // auto targetAttr = mlir::spirv::lookupTargetEnvOrDefault(gpuModule);
     llvm::outs()<<"\n\ntargetAttr: " << targetAttr <<"\n";
     std::unique_ptr<mlir::ConversionTarget> target =
         mlir::SPIRVConversionTarget::get(targetAttr);
 
     mlir::RewritePatternSet patterns(context);
     mlir::SPIRVConversionOptions options;
-    options.use64bitIndex = false;
+    options.use64bitIndex = true;
 
     XeGPUToSPIRVTypeConverter typeConverter(targetAttr, options);
     XeGPUSPIRVFunctionConversionTarget funcTarget(*context, typeConverter);
@@ -251,7 +265,11 @@ void GPUXToSPIRVPass::runOnOperation() {
   
     RewritePatternSet funcPatterns(context);
     funcPatterns.add<FuncOpConversion>(typeConverter, context, 0, 1 /*benefit*/);
-    llvm::outs()<<"\n\nfunc_patterns.add<FuncOpConversion>\n";
+
+    bool forShader =
+      typeConverter.getTargetEnv().allows(spirv::Capability::Shader);
+    llvm::outs()<<"\n\nforShader: "<<forShader<<"\n";
+
     if (failed(
             applyPartialConversion(gpuModule, funcTarget, std::move(funcPatterns))))
       return signalPassFailure();
@@ -277,9 +295,6 @@ void GPUXToSPIRVPass::runOnOperation() {
     if (failed(applyPartialConversion(gpuModule, spirvTarget, std::move(patterns)))){
       return signalPassFailure();
     }
-    // llvm::outs()<<"After Conversion GPUModule\n\n";
-    // gpuModule->print(llvm::outs());
-    // llvm::outs()<<"\n\n";
   }
 };
 
