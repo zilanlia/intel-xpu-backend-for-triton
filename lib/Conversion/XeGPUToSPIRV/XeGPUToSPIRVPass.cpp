@@ -94,6 +94,21 @@ public:
       }
       return true;
     });
+
+    addDynamicallyLegalOp<spirv::VectorShuffleOp>([](spirv::VectorShuffleOp op) -> bool {
+      Value vector1 = op.getVector1();
+      Type type = vector1.getType();
+
+      if(auto vectorType = type.cast<VectorType>()){
+        auto shape = vectorType.getShape();
+        // convert 2d constatn val to 1D to avoid error for spirv
+        if(shape.size() >= 2){
+          return false;
+        }
+      }
+      
+      return true;
+    });
   }
 };
 
@@ -251,7 +266,7 @@ void GPUXToSPIRVPass::runOnOperation() {
 
   {
     // auto targetAttr = mlir::spirv::lookupTargetEnvOrDefault(gpuModule);
-    llvm::outs()<<"\n\ntargetAttr: " << targetAttr <<"\n";
+    // llvm::outs()<<"\n\ntargetAttr: " << targetAttr <<"\n";
     std::unique_ptr<mlir::ConversionTarget> target =
         mlir::SPIRVConversionTarget::get(targetAttr);
 
@@ -265,10 +280,6 @@ void GPUXToSPIRVPass::runOnOperation() {
   
     RewritePatternSet funcPatterns(context);
     funcPatterns.add<FuncOpConversion>(typeConverter, context, 0, 1 /*benefit*/);
-
-    bool forShader =
-      typeConverter.getTargetEnv().allows(spirv::Capability::Shader);
-    llvm::outs()<<"\n\nforShader: "<<forShader<<"\n";
 
     if (failed(
             applyPartialConversion(gpuModule, funcTarget, std::move(funcPatterns))))

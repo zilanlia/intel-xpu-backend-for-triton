@@ -67,14 +67,11 @@ XeGPUToSPIRVTypeConverter::XeGPUToSPIRVTypeConverter(
 
 Type XeGPUToSPIRVTypeConverter::convertXeGPUMemRefType(
         mlir::MemRefType type)  {
-  //Optional<spirv::StorageClass> storageClass = getStorageClassForMemorySpace(1);
   Optional<spirv::StorageClass> storageClass = spirv::StorageClass::CrossWorkgroup;  //crossworkgroup
 
   assert(storageClass && "uncompatible pointer address type in SPIRV");
-  llvm::outs() << "\n\nconvertXeGPUMemRefType type.getElementType(): "<<type.getElementType()<<"\n";
-  //auto ret = spirv::PointerType::get(convertType(type.getElementType()), *storageClass);
+
   auto ret = spirv::PointerType::get(convertType(type.getElementType()), *storageClass);
-  llvm::outs() << "\n\nconvertXeGPUMemRefType ret: "<<ret<<"\n";
   return ret;
 }
 
@@ -85,32 +82,13 @@ Type XeGPUToSPIRVTypeConverter::convertXeGPUVectorType(
   int size = type.getNumElements() * bitWidth / 32;
   auto shape = type.getShape();
 
-  llvm::outs() << "\n\ntype: "<<type<<"\n";
-  llvm::outs() << "\n\nshape.size(): "<<shape.size()<<"\n";
   if(shape.size() == 3 && shape[2] == 2){
-    if (elemType == Float16Type::get(type.getContext())) {
+    if (elemType == Float16Type::get(type.getContext()) || 
+            elemType == BFloat16Type::get(type.getContext())) {
       elemType = IntegerType::get(type.getContext(), 32);
     }
     return VectorType::get(size, elemType);
   }else {
     return type;
-    //return VectorType::get(size, elemType);
   }
-
-  // unsigned rank = type.getRank();
-  // auto elemType = type.getElementType();
-  // if (rank < 1)
-  //   return type;
-  // else {
-  //   // load2d/store2d is vnni format with 3 dims
-  //   if (rank == 3 && elemType.getIntOrFloatBitWidth() < 32) {
-  //     elemType = ::mlir::IntegerType::get(type.getContext(), 32);
-  //     rank--;
-  //   }
-  //   unsigned sum = 1;
-  //   for (unsigned i = 0; i < rank; i++) {
-  //     sum *= type.getShape()[i];
-  //   }
-  //   return ::mlir::VectorType::get(sum, elemType);
-  // }
 }

@@ -242,13 +242,11 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
 
   size_t global_range_x = gridX*32;
   //size_t global_range_x = 32;
-  std::cout << "global_range_x: " << global_range_x << std::endl;
   size_t global_range_y = gridY;
   size_t global_range_z = gridZ;
 
   //size_t local_range_x = num_warps*threads_per_warp;
   size_t local_range_x = 32;
-  std::cout << "local_range_x: " << local_range_x << std::endl;
   size_t local_range_y = 1;
   size_t local_range_z = 1;
 
@@ -256,7 +254,7 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
   sycl::range<3> local_range(local_range_z, local_range_y, local_range_x);
   sycl::nd_range<3> parallel_work_size(global_range, local_range);
 
-  if (1 || getBoolEnv("MLIR_ENABLE_DUMP")){{
+  if (getBoolEnv("MLIR_ENABLE_DUMP")){{
     std::cout << "kernel info name:" << kernel_name << " @" << &kernel_ptr << std::endl;
     std::cout << "kernel info attributes:" << kernel_ptr.get_info<sycl::info::kernel::attributes>() << std::endl;
     std::cout << "kernel info reference_count:" << kernel_ptr.get_info<sycl::info::kernel::reference_count>() << std::endl;
@@ -279,8 +277,8 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
    //if (shared_memory) {{
    //  expected_num_params -= 1;
    //}}
-  std::cout<<"num_params : "<<num_params<<std::endl;
-  std::cout<<"expected num_params  :  "<<expected_num_params<<std::endl;
+   //std::cout<<"num_params : "<<num_params<<std::endl;
+   //std::cout<<"expected num_params  :  "<<expected_num_params<<std::endl;
   assert(num_params == expected_num_params && "number of kernel param not matched");
 
   // Submit the imported kernel.
@@ -300,7 +298,15 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
 
     }};
 
-  auto event = stream.submit(cgf);
+    auto event = stream.submit(cgf);
+    event.wait();
+    auto start = event.get_profiling_info<sycl::info::event_profiling::command_start>();
+    auto end = event.get_profiling_info<sycl::info::event_profiling::command_end>();
+    double gpu_time = (end - start) / 1000000.0;
+    std::cout << "gpu_time: " << gpu_time << " ms" <<std::endl;
+    double ops = 2.0 * 4096 * 4096 * 4096;
+    std::cout << "[perfermance][GPU] Average GFLOPS(GPU_time) of this gemm kernel is " << (ops / 1000000) / gpu_time << std::endl;
+
 #ifdef TRITON_XPU_PROFILE
 xpu::profiler_record(kernel_name, event);
 #endif
