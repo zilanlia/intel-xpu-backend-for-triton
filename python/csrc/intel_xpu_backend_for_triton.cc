@@ -328,6 +328,10 @@ void init_triton_translation(py::module &m) {
            [](mlir::PassManager &self) {
              self.addPass(mlir::createTritonGPULayoutPropagationPass());
            })
+      .def("add_tritongpu_prefetch_to_cache_pass",
+           [](mlir::PassManager &self) {
+             self.addPass(mlir::createTritonGPUPrefetchToCachePass());
+           })
       .def("add_tritongpu_reorder_instructions_pass",
            [](mlir::PassManager &self) {
              self.addPass(mlir::createTritonGPUReorderInstructionsPass());

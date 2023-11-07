@@ -240,8 +240,6 @@ public:
     auto src = adaptor.getSource();
     Type type = src.getType();
 
-    // llvm::outs() << "\n\ntype:  "<<type<<"\n";
-
     auto memoryScope = op.getMemoryScope();
     bool usingSLM = memoryScope == xegpu::MemoryScope::SLM;
 
@@ -285,12 +283,6 @@ public:
     if (rank == 2) {
       auto blockWidth = tileType.getShape()[1];
       auto blockHeight = tileType.getShape()[0];
-
-      // // fixme: support memref for now
-      // auto memType = cast<MemRefType>(src.getType());
-      // unsigned bitWidth = memType.getElementType().getIntOrFloatBitWidth();
-      // auto surfaceWidth = memType.getShape()[1] * (bitWidth / 8) - 1;
-      // auto surfaceHeight = memType.getShape()[0] - 1;
 
       // support i64 addr
       auto shape = adaptor.getShape();
@@ -343,14 +335,10 @@ public:
     Location loc = op.getLoc();
     auto payLoad = adaptor.getTensorDesc();
     auto offset = adaptor.getOffsets();
-    
-    // llvm::outs() << "\n\npayLoad :  "<<payLoad <<"\n";
-    // llvm::outs() << "\n\noffset:  "<<offset[0]<<"\n";
-    // llvm::outs() << "\n\noffset:  "<<offset[1]<<"\n";
+
 
     auto idx5 = i32_val(5);
     auto idx6 = i32_val(6);
-
     auto offsetX = rewriter.create<spirv::VectorExtractDynamicOp>(loc, i32Type, 
                                                                   payLoad, idx5);
     auto offsetY = rewriter.create<spirv::VectorExtractDynamicOp>(loc, i32Type, 
@@ -535,6 +523,24 @@ public:
   }
 };
 
+xegpu::CreateNdDescOp findDescOp(mlir::Value val) {
+  if (auto op = val.getDefiningOp()) {
+    if (auto descOp = dyn_cast<xegpu::CreateNdDescOp>(op)) {
+      return descOp;
+    } else if (auto update = dyn_cast<xegpu::UpdateNDOffsetOp>(op)) {
+      return findDescOp(update.getTensorDesc());
+    }
+  } else if (auto arg = dyn_cast<BlockArgument>(val)) {
+    auto ownerOp = arg.getOwner()->getParentOp();
+    auto forOp = cast<scf::ForOp>(ownerOp);
+    auto init = forOp.getInitArgs()[arg.getArgNumber() - 1];
+    return findDescOp(init);
+  } else {
+    assert(0 && "add more support");
+  }
+  return xegpu::CreateNdDescOp();
+}
+
 template <typename OpType>
 class LoadStorePrefetchNdToRawSend : public OpConversionPattern<OpType> {
 public:
@@ -543,21 +549,11 @@ public:
   matchAndRewrite(OpType op, typename OpType::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     // llvm::outs()<<"\n\nLoadStorePrefetchNdToRawSend: "<<"\n";
-
     auto payLoad = adaptor.getTensorDesc();
-    // llvm::outs() << "\n\npayload: " << payLoad << "\n";
+    auto createDescOp = findDescOp(op.template getTensorDesc());
+    auto memoryScope = createDescOp.getMemoryScope();
+    bool usingSLM = memoryScope == xegpu::MemoryScope::SLM;;
 
-    bool usingSLM = false;
-    if(auto createDescOp = payLoad.template getDefiningOp<CreateNdDescOp>()){
-      auto memoryScope = createDescOp.getMemoryScope();
-      memoryScope == xegpu::MemoryScope::SLM;
-    }else{
-      // to do : get memoryScope
-      // BlockArgument blockArg = payLoad.template cast<BlockArgument>();
-      // auto parentOp = blockArg.getOwner()->getParentOp();
-      // auto forOp = cast<spirv::LoopOp>(parentOp);
-      //llvm::outs()<<"\n\nforOp: "<<forOp<<"\n";
-    }
 
     auto tileType = op.getTensorDesc().getType();
     auto rank = tileType.getRank();
@@ -818,7 +814,7 @@ public:
       elems = vecType.getNumElements();
       funcName = "llvm_genx_raw_sends2_noresult_i1_v8i32_";
     }
-    // llvm::outs()<<"\n\nelems : "<<elems<<"\n";
+
     std::string typeStr;
     std::tie(typeStr, newType) = encodeVectorType(rewriter, vecType);
     funcName += typeStr;
@@ -839,15 +835,14 @@ public:
                       : createIntConstant(i8Type, 15); //to do slm
     auto extMsg = createIntConstant(i32Type, 0);
     auto vecSize = 0;
-    // llvm::outs()<<"\n\nnumDstVal: " <<numDstVal<<"\n";
-    // llvm::outs()<<"\n\nexecSize: " <<execSize<<"\n";
+
     if (numDstVal <= 4) {
       vecSize = numDstVal - 1;
     } else {
       vecSize = log2(numDstVal) + 1;
     }
     vecSize = elems / SIMD - 1;
-    // llvm::outs()<<"\n\nvecSize: " <<vecSize<<"\n";
+
     // message descriptor
     uint32_t rawSendMsg = 0;
     rawSendMsg |= (isLoad) ? 0 : 4;
@@ -890,8 +885,6 @@ public:
     }
     offsets = rewriter.create<spirv::IMulOp>(loc, payLoadType, offsets, dataSizes);
     payLoad = rewriter.create<spirv::IAddOp>(loc, payLoadType, payLoad, offsets);
-    // llvm::outs()<<"\n\nbase: "<<base<<"\n";
-    // llvm::outs()<<"\n\npayload: "<<payLoad<<"\n";
 
     SmallVector<Value> args{modifier, execSize, pred, numSrc1, numDst,
                             sfid,     extMsg,   msg,  payLoad};
@@ -1178,7 +1171,6 @@ public:
     VectorType vecType = op.getResult().getType().cast<VectorType>();
     Type elemType = vecType.getElementType();
     auto src = adaptor.getOperand();
-    // llvm::outs()<<"\n\nExpOpToVCPattern vecType: "<<vecType<<"\n";
 
     Value log2eConst;
     if(elemType == f32Type){
@@ -1246,129 +1238,6 @@ public:
                                                             funcName, args).getResults()[0];
     llvm::outs() << "\nFMaxOpToVCPattern ret: \n" << ret << "\n";
     rewriter.replaceOp(op, ret);
-
-    return success();
-  }
-};
-
-class LoadGatherOpToVCPattern : public OpConversionPattern<LoadGatherOp> {
-public:
-  using OpConversionPattern<LoadGatherOp>::OpConversionPattern;
-  LogicalResult
-  matchAndRewrite(LoadGatherOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    // llvm::outs() << "\n\nLoadGatherOpToVCPattern: \n";
-    auto loc = op.getLoc();
-    auto result = op.getODSResults(0)[0];
-
-    auto src = adaptor.getTensorDesc();
-    llvm::outs()<<"\n\nsrc: "<<src<<"\n";
-    Type type = src.getType();
-
-    auto cerate_desc_op = dyn_cast_or_null<CreateDescOp>(op.getTensorDesc().getDefiningOp());
-
-    Value offsets = cerate_desc_op.getOffsets();
-    auto vecType = result.getType().dyn_cast<mlir::VectorType>();
-    auto shape = vecType.getShape();
-    auto memoryScope = cerate_desc_op.getMemoryScope();
-    llvm::outs()<<"\n\noffsets: "<<offsets<<"\n";
-
-    Value vectorSize = i32_val(log2(shape[0]));
-    if(memoryScope == xegpu::MemoryScope::SLM){
-      std::string funcName = "llvm_genx_lsc_load_slm_";
-      funcName += encodeVectorType(rewriter, vecType, false).first;
-      funcName += "_i1_i64";
-      llvm::outs() << "\n\nLoadGatherOpToVCPattern funcName: " << funcName << "\n";
-      Value baseAddr = rewriter.create<UnrealizedConversionCastOp>(loc, i32Type, adaptor.getTensorDesc()).getResult(0);
-      Value offset = rewriter.create<spirv::VectorExtractDynamicOp>(loc, i32Type, offsets, i32_val(0));
-      Value addr = rewriter.create<spirv::IAddOp>(loc, i32Type, baseAddr, offset);
-
-      SmallVector<Value> args{i1_val(1), i8_val(0), i8_val(0), i8_val(0), i16_val(1), i32_val(0), i8_val(3), i8_val(7), i8_val(2), i8_val(0), baseAddr ,i32_val(0)};
-      auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {vecType});
-
-      Operation *opPtr = op;
-      lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
-
-      auto retType = mlir::VectorType::get(shape[0], mlir::FloatType::getF32(rewriter.getContext()));
-      auto loadOp = rewriter.create<spirv::FunctionCallOp>(loc, ArrayRef<mlir::Type>{retType},
-                                                            funcName, args);
-      auto vec = loadOp.getResults()[0];
-
-      rewriter.replaceOp(op, vec);
-    } else {
-      std::string funcName = "llvm_genx_lsc_load_stateless_";
-      funcName += encodeVectorType(rewriter,vecType,false).first;
-      funcName += "_i1_i64";
-      llvm::outs() << "\n\nLoadGatherOpToVCPattern funcName: " << funcName << "\n";
-
-      Value baseAddr = rewriter.create<UnrealizedConversionCastOp>(loc, rewriter.getI64Type(), adaptor.getTensorDesc()).getResult(0);
-      SmallVector<Value> args{i1_val(1), i8_val(0), i8_val(0), i8_val(0), i16_val(1), i32_val(0), i8_val(3), i8_val(7), i8_val(2), i8_val(0), baseAddr ,i32_val(0)};
-      auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {vecType});
-
-      Operation *opPtr = op;
-      lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
-
-      auto retType = mlir::VectorType::get(shape[0], mlir::FloatType::getF32(rewriter.getContext()));
-      auto loadOp = rewriter.create<spirv::FunctionCallOp>(loc, ArrayRef<mlir::Type>{retType},
-                                                            funcName, args);
-      auto vec = loadOp.getResults()[0];
-
-      rewriter.replaceOp(op, vec);
-    }
-
-    return success();
-  }
-};
-
-class StoreScatterOpToVCPattern : public OpConversionPattern<StoreScatterOp> {
-public:
-  using OpConversionPattern<StoreScatterOp>::OpConversionPattern;
-  LogicalResult
-  matchAndRewrite(StoreScatterOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
-    // llvm::outs() << "\n\n StoreScatterOpToVCPattern;\n";
-    auto loc = op.getLoc();
-    auto value = adaptor.getValue();
-
-    auto cerate_desc_op = dyn_cast_or_null<CreateDescOp>(op.getTensorDesc().getDefiningOp());
-    //auto offsets = cerate_desc_op.getOffsets().Value;
-    auto vecType = value.getType().dyn_cast<mlir::VectorType>();
-    auto shape = vecType.getShape();
-    auto memoryScope = cerate_desc_op.getMemoryScope();
-
-    Value vectorSize = i32_val(log2(shape[0]));
-    if(memoryScope == xegpu::MemoryScope::SLM){
-      std::string funcName = "llvm_genx_lsc_store_slm_i1_i64_";
-      funcName += encodeVectorType(rewriter, vecType, false).first;
-      llvm::outs() << "\n\nStoreGatherOpToVCPattern funcName: " << funcName << "\n";
-
-      Value baseAddr = rewriter.create<UnrealizedConversionCastOp>(loc, i32Type, adaptor.getTensorDesc()).getResult(0);
-
-      SmallVector<Value> args{i1_val(1), i8_val(4), i8_val(0), i8_val(0), i16_val(1), i32_val(0), i8_val(3), i8_val(2), i8_val(2), i8_val(0), baseAddr, value, i32_val(0)};
-      auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {});
-
-      Operation *opPtr = op;
-      lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
-
-      rewriter.create<spirv::FunctionCallOp>(loc, ArrayRef<mlir::Type>{},
-                                                            funcName, args);
-      rewriter.eraseOp(op);
-    } else {
-      std::string funcName = "llvm_genx_lsc_store_stateless_i1_i64_";
-      funcName += encodeVectorType(rewriter, vecType, false).first;
-      llvm::outs() << "\n\nStoreGatherOpToVCPattern funcName: " << funcName << "\n";
-
-      Value baseAddr = rewriter.create<UnrealizedConversionCastOp>(loc, rewriter.getI64Type(), adaptor.getTensorDesc()).getResult(0);
-      SmallVector<Value> args{i1_val(1), i8_val(4), i8_val(0), i8_val(0), i16_val(1), i32_val(0), i8_val(3), i8_val(7), i8_val(2), i8_val(0), baseAddr, value, i32_val(0)};
-      auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {});
-
-      Operation *opPtr = op;
-      lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
-
-      rewriter.create<spirv::FunctionCallOp>(loc, ArrayRef<mlir::Type>{},
-                                                            funcName, args);
-      rewriter.eraseOp(op);
-    }
 
     return success();
   }
@@ -1529,7 +1398,6 @@ void populateXeGPUToVCIntrinsicsPatterns(
                CompilerHintToVCPattern, MfenceToVCPattern, 
                CreateDescOpToVCPattern, AllocaOpToVCPattern,
                CreateNdDescToVCPattern, UpdateNDOffsetToVCPattern,
-               //LoadGatherOpToVCPattern, StoreScatterOpToVCPattern, 
                GatherScatterToRawSend<LoadGatherOp>,
                GatherScatterToRawSend<StoreScatterOp>>(
       typeConverter, patterns.getContext());
