@@ -76,6 +76,12 @@ def ttgir_to_xegir(mod):
     pm.run(mod)
     return mod
 
+def optimize_xegir(mod):
+    pm = _triton.pass_manager(mod.context)
+    pm.add_xegpu_optimize_dotop_pass()
+    pm.run(mod)
+    return mod
+
 def xegir_to_spirv(mod, extern_libs, compute_capability):
     if extern_libs:
         add_external_libs(mod, extern_libs)
@@ -459,11 +465,12 @@ class XPUBackend(BaseBackend):
                             lambda src: optimize_ttgir(src, arch["num_stages"], arch))
             stages["xegir"] = (lambda path: Path(path).read_text(),
                             lambda src: ttgir_to_xegir(src))
+            stages["optimize_xegir"] = (lambda path: Path(path).read_text(),
+                            lambda src: optimize_xegir(src))
             stages["spirv"] = (lambda path: Path(path).read_text(),
                             lambda src: xegir_to_spirv(src, extern_libs, arch))
             stages["spvbin"] = (lambda path: Path(path).read_bytes(),
                                 lambda src: spirv_to_spvbin(src, arch))
-            
         else:
             stages["ttgir"] = (lambda path: _triton.parse_mlir_module(Path(path).read_text(), context),
                             lambda src: optimize_ttgir(ttir_to_ttgir(src, arch["num_warps"]), arch["num_stages"], arch))

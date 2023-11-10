@@ -6,6 +6,7 @@
 #include "mlir/Support/FileUtilities.h"
 #include "triton/Dialect/Triton/IR/Dialect.h"
 #include "triton/Dialect/TritonGPU/IR/Dialect.h"
+#include "triton/Dialect/XeGPU/IR/XeGPUOps.h"
 
 #include <Python.h>
 #include <cctype>
@@ -26,6 +27,7 @@
 #include "triton/Conversion/TritonGPUToXeGPU/TritonGPUToXeGPUPass.h"
 #include "triton/Dialect/Triton/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
+#include "triton/Dialect/XeGPU/Transforms/Passes.h"
 #include "triton/Target/SPIRV/SPIRVTranslation.h"
 #include "triton/Tools/Sys/GetEnv.hpp"
 #include <llvm/IR/Verifier.h>
@@ -331,6 +333,10 @@ void init_triton_translation(py::module &m) {
       .def("add_tritongpu_prefetch_to_cache_pass",
            [](mlir::PassManager &self) {
              self.addPass(mlir::createTritonGPUPrefetchToCachePass());
+           })
+      .def("add_xegpu_optimize_dotop_pass",
+           [](mlir::PassManager &self) {
+             self.addPass(mlir::createXeGPUOptimizeDotOpPass());
            })
       .def("add_tritongpu_reorder_instructions_pass",
            [](mlir::PassManager &self) {

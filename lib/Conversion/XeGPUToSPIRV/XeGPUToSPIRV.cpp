@@ -60,6 +60,8 @@ Value createConstantI64(Location loc, PatternRewriter &rewriter, int64_t v) {
 #define f32Type rewriter.getF32Type()
 #define f64Type rewriter.getF64Type()
 #define bf16Type rewriter.getBF16Type()
+#define v8i32 VectorType::get(8, i32Type)
+#define v4i64 VectorType::get(4, i64Type)
 #define logic_shl(...) rewriter.create<spirv::ShiftLeftLogicalOp>(loc, __VA_ARGS__)
 #define bitwise_or(...) rewriter.create<spirv::BitwiseOrOp>(loc, __VA_ARGS__)
 #define bitwise_and(...) rewriter.create<spirv::BitwiseAndOp>(loc, __VA_ARGS__)
@@ -258,9 +260,6 @@ public:
       return rewriter.create<spirv::ConstantOp>(loc, type, attr);
     };
 
-    auto v8i32 = VectorType::get(8, i32Type);
-    auto v4i64 = VectorType::get(4, i64Type);
-    
     auto idx0 = createIntConstant(i32Type, 0);
     auto idx2 = createIntConstant(i32Type, 2);
     auto idx3 = createIntConstant(i32Type, 3);
@@ -336,21 +335,61 @@ public:
     auto payLoad = adaptor.getTensorDesc();
     auto offset = adaptor.getOffsets();
 
-
     auto idx5 = i32_val(5);
     auto idx6 = i32_val(6);
-    auto offsetX = rewriter.create<spirv::VectorExtractDynamicOp>(loc, i32Type, 
-                                                                  payLoad, idx5);
-    auto offsetY = rewriter.create<spirv::VectorExtractDynamicOp>(loc, i32Type, 
-                                                                  payLoad, idx6);
 
-    auto newOffsetX = add(offsetX, offset[1]);
-    auto newOffsetY = add(offsetY, offset[0]);
+    int offset0, offset1;
+    bool constantOffset0 = 0;
+    bool constantOffset1 = 0;
+    // auto offsetX = rewriter.create<spirv::VectorExtractDynamicOp>(loc, i32Type, 
+    //                                                               payLoad, idx5);
+    // auto offsetY = rewriter.create<spirv::VectorExtractDynamicOp>(loc, i32Type, 
+    //                                                               payLoad, idx6);
+    if(auto *parentOp = offset[0].getDefiningOp()){
+      llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] parentOp: "<<*parentOp<<"\n";
+      if(auto castOp = dyn_cast<spirv::ConstantOp>(parentOp)){
+        auto value = castOp.getValue().cast<IntegerAttr>().getValue().getZExtValue();
+        constantOffset0 = 1;
+        offset0 = value;
+      }
+    }
 
-    payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
-                                                            newOffsetX, idx5);
-    payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
-                                                            newOffsetY, idx6);
+    if(auto *parentOp = offset[1].getDefiningOp()){
+      llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] parentOp: "<<*parentOp<<"\n";
+      if(auto castOp = dyn_cast<spirv::ConstantOp>(parentOp)){
+        auto value = castOp.getValue().cast<IntegerAttr>().getValue().getZExtValue();
+        constantOffset1 = 1;
+        offset1 = value;
+      }
+    }
+
+    llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] constantOffset0: "<<constantOffset0<<"\n";
+    llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] constantOffset1: "<<constantOffset1<<"\n";
+
+    Value offsets = rewriter.create<spirv::UndefOp>(loc, v8i32);
+    auto idx0 = i32_val(0);
+    offsets = rewriter.create<spirv::VectorInsertDynamicOp>(loc, offsets, idx0, idx0);
+    SmallVector<int32_t, 32> indices(8, 0);
+    offsets = rewriter.create<spirv::VectorShuffleOp>(
+          loc, v8i32, offsets, offsets, rewriter.getI32ArrayAttr(indices));
+    if(!(constantOffset0 && offset0 == 0)){
+      offsets = rewriter.create<spirv::VectorInsertDynamicOp>(loc, offsets, offset[0], idx6);
+    }
+    if(!(constantOffset1 && offset1 == 0)){
+      offsets = rewriter.create<spirv::VectorInsertDynamicOp>(loc, offsets, offset[1], idx5);
+    }
+
+    
+
+    payLoad = add(payLoad, offsets);
+
+    // auto newOffsetX = add(offsetX, offset[1]);
+    // auto newOffsetY = add(offsetY, offset[0]);
+
+    // payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
+    //                                                         newOffsetX, idx5);
+    // payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
+    //                                                         newOffsetY, idx6);
 
     rewriter.replaceOp(op, payLoad);
     return success();
