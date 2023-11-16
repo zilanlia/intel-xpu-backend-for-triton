@@ -82,7 +82,7 @@ encodeVectorType(ConversionPatternRewriter &rewriter, VectorType type,
   if (use64bitData) {
     size /= 2;
   }
-  if(use16bitData){
+  if(use16bitData && bitWidth==16){
     size *= 2;
   }
   std::string str;
@@ -124,7 +124,7 @@ encodeVectorType(ConversionPatternRewriter &rewriter, VectorType type,
     elemType = rewriter.getI64Type();
   } else if (elemType == f32Type){
     str += "f32";
-  } else if ((elemType == f16Type) || (elemType == bf16Type)) {
+  } else if (elemType == f16Type || (elemType == i16Type) || (elemType == bf16Type)) {
     if(use16bitData){
       str += "f16";
       elemType = f16Type;
@@ -341,12 +341,9 @@ public:
     int offset0, offset1;
     bool constantOffset0 = 0;
     bool constantOffset1 = 0;
-    // auto offsetX = rewriter.create<spirv::VectorExtractDynamicOp>(loc, i32Type, 
-    //                                                               payLoad, idx5);
-    // auto offsetY = rewriter.create<spirv::VectorExtractDynamicOp>(loc, i32Type, 
-    //                                                               payLoad, idx6);
+
     if(auto *parentOp = offset[0].getDefiningOp()){
-      llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] parentOp: "<<*parentOp<<"\n";
+      //llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] parentOp: "<<*parentOp<<"\n";
       if(auto castOp = dyn_cast<spirv::ConstantOp>(parentOp)){
         auto value = castOp.getValue().cast<IntegerAttr>().getValue().getZExtValue();
         constantOffset0 = 1;
@@ -355,7 +352,7 @@ public:
     }
 
     if(auto *parentOp = offset[1].getDefiningOp()){
-      llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] parentOp: "<<*parentOp<<"\n";
+      //llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] parentOp: "<<*parentOp<<"\n";
       if(auto castOp = dyn_cast<spirv::ConstantOp>(parentOp)){
         auto value = castOp.getValue().cast<IntegerAttr>().getValue().getZExtValue();
         constantOffset1 = 1;
@@ -363,8 +360,8 @@ public:
       }
     }
 
-    llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] constantOffset0: "<<constantOffset0<<"\n";
-    llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] constantOffset1: "<<constantOffset1<<"\n";
+    //llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] constantOffset0: "<<constantOffset0<<"\n";
+    //llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] constantOffset1: "<<constantOffset1<<"\n";
 
     Value offsets = rewriter.create<spirv::UndefOp>(loc, v8i32);
     auto idx0 = i32_val(0);
@@ -593,7 +590,6 @@ public:
     auto memoryScope = createDescOp.getMemoryScope();
     bool usingSLM = memoryScope == xegpu::MemoryScope::SLM;;
 
-
     auto tileType = op.getTensorDesc().getType();
     auto rank = tileType.getRank();
     assert(rank <= 2 && "only support 1d/2d load/store/prefetch for now");
@@ -710,7 +706,20 @@ public:
         args.erase(args.begin() + 4);
       else {
         if (rank == 2) {
-          args.push_back(adaptor.getValue());
+          Value data = adaptor.getValue();
+          Type type = data.getType();
+          if(isa<VectorType>(type)){
+            auto shape = type.cast<VectorType>().getShape();
+            auto elemType = type.cast<VectorType>().getElementType();
+            auto bitwidth = elemType.getIntOrFloatBitWidth();
+            if(elemType == i16Type){
+              //todo distinguish bf16 and i16
+              type = VectorType::get(shape, f16Type);
+            }
+          }
+
+          data = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, type, data)->getResults()[0];
+          args.push_back(data);
           // llvm::outs() << "adaptor.getValue()"<<adaptor.getValue()<<"\n";
         } else if (rank == 1) {
           if(adaptor.getValue().getType() != newType){
@@ -757,7 +766,7 @@ public:
     uint8_t n = rhsType.getShape()[1];
     // refer to IGC/visa/Common_ISA_util.cpp#87
     auto encodePrecision = [&](Type type) -> uint8_t {
-      if (type == bf16Type)
+      if ((type == i16Type) || (type == bf16Type))
         return 9;
       else if (type == f16Type)
         return 10;
@@ -956,12 +965,12 @@ public:
       rewriter.create<spirv::FunctionCallOp>(loc, TypeRange(), funcName, args);
       rewriter.eraseOp(op);
     }
-    llvm::outs()<<"\n\nAfter GatherScatterToRawSend\n";
-    if(isa<StoreScatterOp>(op)){
-      Operation *opPtr = op;
-      auto mod = opPtr->getParentOfType<mlir::ModuleOp>();
-      mod->print(llvm::outs());
-    }
+    // llvm::outs()<<"\n\nAfter GatherScatterToRawSend\n";
+    // if(isa<StoreScatterOp>(op)){
+    //   Operation *opPtr = op;
+    //   auto mod = opPtr->getParentOfType<mlir::ModuleOp>();
+    //   mod->print(llvm::outs());
+    // }
     return success();
   }
 };
@@ -1395,11 +1404,12 @@ public:
     // llvm::outs() << "\n\nsrcType: " << srcType << "\n";
     // llvm::outs() << "\n\nretType: " << retType << "\n";
 
-    if((srcElemType == bf16Type) || (retElemType == bf16Type)){
+    if((srcElemType == bf16Type) || (retElemType == bf16Type)
+       || (retElemType == i16Type) || (retElemType == i16Type)){
       std::string funcName = "llvm_genx_bf_cvt_";
-      funcName += encodeVectorType(rewriter, retType).first;
+      funcName += encodeVectorType(rewriter, retType, false, true).first;
       funcName += "_";
-      funcName += encodeVectorType(rewriter, srcType).first;
+      funcName += encodeVectorType(rewriter, srcType, false, true).first;
 
       if(retElemType == bf16Type){
         auto shape = retType.getShape();
