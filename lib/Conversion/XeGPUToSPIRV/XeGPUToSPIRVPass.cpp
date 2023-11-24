@@ -52,7 +52,7 @@ using namespace mlir::triton;
 
 class XeGPUSPIRVFunctionConversionTarget : public ConversionTarget {
 public:
-  explicit XeGPUSPIRVFunctionConversionTarget(MLIRContext &ctx, SPIRVTypeConverter& typeConverter)
+  explicit XeGPUSPIRVFunctionConversionTarget(MLIRContext &ctx, XeGPUToSPIRVTypeConverter& typeConverter)
           : ConversionTarget(ctx) {
     addLegalDialect<spirv::SPIRVDialect>();
     addIllegalOp<mlir::gpu::GPUFuncOp>();
@@ -107,6 +107,22 @@ public:
         }
       }
       
+      return true;
+    });
+
+    addDynamicallyLegalOp<vector::ShapeCastOp>([](vector::ShapeCastOp op) -> bool {
+      Value result = op.getResult();
+      Type type = result.getType();
+      llvm::outs() << "\n\n[addDynamicallyLegalOp] result: " << result << "\n";
+
+      if(auto vectorType = type.cast<VectorType>()){
+        auto shape = vectorType.getShape();
+        // convert 2d constatn val to 1D to avoid error for spirv
+        if(shape.size() >= 2){
+          return false;
+        }
+      }
+      llvm::outs() << "\n\n[addDynamicallyLegalOp] true\n";
       return true;
     });
   }
@@ -179,7 +195,6 @@ struct FuncOpConversion : public OpConversionPattern<mlir::gpu::GPUFuncOp> {
     // Set the SPIRV kernel entry point
     newFuncOp->setAttr(spirv::getEntryPointABIAttrName(), spirv::EntryPointABIAttr::get(getContext(), nullptr, std::nullopt));
 
-    llvm::outs()<<"\n\nset attribute\n";
     // Copy over all attributes other than the function name and type.
     for (const auto &namedAttr : funcOp->getAttrs()) {
         if (namedAttr.getName() != funcOp.getFunctionTypeAttrName() &&

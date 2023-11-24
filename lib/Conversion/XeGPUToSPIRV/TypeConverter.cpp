@@ -79,17 +79,18 @@ Type XeGPUToSPIRVTypeConverter::convertXeGPUVectorType(
         VectorType type)  {
   auto elemType = type.getElementType();
   auto bitWidth = elemType.getIntOrFloatBitWidth();
-  int size = type.getNumElements() * bitWidth / 32;
+  int size = type.getNumElements();
   auto shape = type.getShape();
 
-  if(shape.size() == 3 && shape[2] == 2){
+  if(shape.size() == 3 && shape[2] <= 2){
     if (elemType == Float16Type::get(type.getContext()) 
           || elemType == BFloat16Type::get(type.getContext())
           || elemType == IntegerType::get(type.getContext(), 16)) {
+      size /= 2;
       elemType = IntegerType::get(type.getContext(), 32);
     }
     return VectorType::get(size, elemType);
   }else {
-    return type;
+    return VectorType::get(size, elemType);
   }
 }

@@ -17,6 +17,8 @@
 #include <mlir/Dialect/SPIRV/IR/SPIRVDialect.h>
 #include <mlir/Dialect/SPIRV/IR/SPIRVOps.h>
 #include <mlir/Transforms/DialectConversion.h>
+#include "XeGPUToSPIRVBase.h"
+
 namespace mlir {
 class SPIRVTypeConverter;
 class RewritePatternSet;
@@ -25,6 +27,6 @@ class Pass;
 
 // XeGPU to VC Intrinsics pattern
 void populateXeGPUToVCIntrinsicsPatterns(
-    mlir::SPIRVTypeConverter &typeConverter, mlir::RewritePatternSet &patterns);
+    XeGPUToSPIRVTypeConverter &typeConverter, mlir::RewritePatternSet &patterns);
 
 #endif // IMEX_CONVERSION_XEGPUTOSPIRV_H

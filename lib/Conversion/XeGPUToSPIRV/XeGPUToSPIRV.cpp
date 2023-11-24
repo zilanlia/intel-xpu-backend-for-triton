@@ -14,6 +14,7 @@
 //===----------------------------------------------------------------------===//
 #include "XeGPUToSPIRV.h"
 #include "triton/Dialect/XeGPU/IR/XeGPUOps.h"
+#include "TypeConverter.h"
 
 #include <llvm/ADT/ArrayRef.h>
 #include <mlir/Dialect/Arith/IR/Arith.h>
@@ -232,12 +233,13 @@ void lookupOrInsertIntrinsic(ConversionPatternRewriter &rewriter, Operation *op,
   }
 }
 
-class CreateNdDescToVCPattern : public OpConversionPattern<CreateNdDescOp> {
+class CreateNdDescToVCPattern : public ConvertXeGPUToSPIRVPattern<CreateNdDescOp> {
 public:
-  using OpConversionPattern<CreateNdDescOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<CreateNdDescOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(CreateNdDescOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {
+                  ConversionPatternRewriter &rewriter) const override {\
+    llvm::outs()<<"\n\n[CreateNdDescToVCPattern]\n";
     Location loc = op.getLoc();
     auto src = adaptor.getSource();
     Type type = src.getType();
@@ -325,12 +327,13 @@ public:
   }
 };
 
-class UpdateNDOffsetToVCPattern : public OpConversionPattern<UpdateNDOffsetOp> {
+class UpdateNDOffsetToVCPattern : public ConvertXeGPUToSPIRVPattern<UpdateNDOffsetOp> {
 public:
-  using OpConversionPattern<UpdateNDOffsetOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<UpdateNDOffsetOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(UpdateNDOffsetOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
+    llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern]\n";
     Location loc = op.getLoc();
     auto payLoad = adaptor.getTensorDesc();
     auto offset = adaptor.getOffsets();
@@ -394,9 +397,9 @@ public:
 };
 
 template <typename OpType>
-class LoadStorePrefetchNdToLsc : public OpConversionPattern<OpType> {
+class LoadStorePrefetchNdToLsc : public ConvertXeGPUToSPIRVPattern<OpType> {
 public:
-  using OpConversionPattern<OpType>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<OpType>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(OpType op, typename OpType::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -578,9 +581,9 @@ xegpu::CreateNdDescOp findDescOp(mlir::Value val) {
 }
 
 template <typename OpType>
-class LoadStorePrefetchNdToRawSend : public OpConversionPattern<OpType> {
+class LoadStorePrefetchNdToRawSend : public ConvertXeGPUToSPIRVPattern<OpType> {
 public:
-  using OpConversionPattern<OpType>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<OpType>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(OpType op, typename OpType::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -749,17 +752,20 @@ public:
   }
 };
 
-class DpasToVCPattern : public OpConversionPattern<DpasOp> {
+class DpasToVCPattern : public ConvertXeGPUToSPIRVPattern<DpasOp> {
 public:
-  using OpConversionPattern<DpasOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<DpasOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(DpasOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // llvm::outs()<<"\n\n[DpasToVCPattern]\n";
+    llvm::outs()<<"\n\n[DpasToVCPattern]\n";
     auto loc = op.getLoc();
     auto lhsType = op.getLhs().getType().cast<VectorType>();
     auto rhsType = op.getRhs().getType().cast<VectorType>();
     auto resultType = op.getResultType().cast<VectorType>();
+
+    Type retType = this->getTypeConverter()->convertXeGPUVectorType(resultType);
+
     auto elemType = resultType.getElementType();
     uint8_t rc = lhsType.getShape()[0];
     uint8_t sd = lhsType.getShape()[1];
@@ -806,10 +812,10 @@ public:
     funcName += "_";
     funcName += encodeVectorType(rewriter, lhsType).first;
     auto funcType =
-        rewriter.getFunctionType(ValueRange(args).getTypes(), resultType);
+        rewriter.getFunctionType(ValueRange(args).getTypes(), retType);
     Operation *opPtr = op;
     lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
-    auto funcOp = rewriter.create<spirv::FunctionCallOp>(loc, resultType,
+    auto funcOp = rewriter.create<spirv::FunctionCallOp>(loc, retType,
                                     funcName, args).getResults()[0];
 
     rewriter.replaceOp(op, funcOp);
@@ -818,9 +824,9 @@ public:
 };
 
 template <typename OpType>
-class GatherScatterToRawSend : public OpConversionPattern<OpType> {
+class GatherScatterToRawSend : public ConvertXeGPUToSPIRVPattern<OpType> {
 public:
-  using OpConversionPattern<OpType>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<OpType>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(OpType op, typename OpType::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -965,19 +971,19 @@ public:
       rewriter.create<spirv::FunctionCallOp>(loc, TypeRange(), funcName, args);
       rewriter.eraseOp(op);
     }
-    // llvm::outs()<<"\n\nAfter GatherScatterToRawSend\n";
-    // if(isa<StoreScatterOp>(op)){
-    //   Operation *opPtr = op;
-    //   auto mod = opPtr->getParentOfType<mlir::ModuleOp>();
-    //   mod->print(llvm::outs());
-    // }
+    llvm::outs()<<"\n\nAfter GatherScatterToRawSend\n";
+    if(isa<StoreScatterOp>(op)){
+      Operation *opPtr = op;
+      auto mod = opPtr->getParentOfType<mlir::ModuleOp>();
+      mod->print(llvm::outs());
+    }
     return success();
   }
 };
 
-class AllocNbarrierToVCPattern : public OpConversionPattern<AllocNbarrierOp> {
+class AllocNbarrierToVCPattern : public ConvertXeGPUToSPIRVPattern<AllocNbarrierOp> {
 public:
-  using OpConversionPattern<AllocNbarrierOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<AllocNbarrierOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(AllocNbarrierOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1006,9 +1012,9 @@ public:
   }
 };
 
-class CreateNbarrierToVCPattern : public OpConversionPattern<CreateNbarrierOp> {
+class CreateNbarrierToVCPattern : public ConvertXeGPUToSPIRVPattern<CreateNbarrierOp> {
 public:
-  using OpConversionPattern<CreateNbarrierOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<CreateNbarrierOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(CreateNbarrierOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1042,9 +1048,9 @@ public:
   }
 };
 
-class NbarrierArriveToVCPattern : public OpConversionPattern<NbarrierArriveOp> {
+class NbarrierArriveToVCPattern : public ConvertXeGPUToSPIRVPattern<NbarrierArriveOp> {
 public:
-  using OpConversionPattern<NbarrierArriveOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<NbarrierArriveOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(NbarrierArriveOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1078,9 +1084,9 @@ public:
   }
 };
 
-class NbarrierWaitToVCPattern : public OpConversionPattern<NbarrierWaitOp> {
+class NbarrierWaitToVCPattern : public ConvertXeGPUToSPIRVPattern<NbarrierWaitOp> {
 public:
-  using OpConversionPattern<NbarrierWaitOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<NbarrierWaitOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(NbarrierWaitOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1108,9 +1114,9 @@ public:
   }
 };
 
-class CompilerHintToVCPattern : public OpConversionPattern<CompilerHintOp> {
+class CompilerHintToVCPattern : public ConvertXeGPUToSPIRVPattern<CompilerHintOp> {
 public:
-  using OpConversionPattern<CompilerHintOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<CompilerHintOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(CompilerHintOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1131,9 +1137,9 @@ public:
   }
 };
 
-class MfenceToVCPattern : public OpConversionPattern<MfenceOp> {
+class MfenceToVCPattern : public ConvertXeGPUToSPIRVPattern<MfenceOp> {
 public:
-  using OpConversionPattern<MfenceOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<MfenceOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(MfenceOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1185,9 +1191,9 @@ public:
   }
 };
 
-class CreateDescOpToVCPattern : public OpConversionPattern<CreateDescOp> {
+class CreateDescOpToVCPattern : public ConvertXeGPUToSPIRVPattern<CreateDescOp> {
 public:
-  using OpConversionPattern<CreateDescOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<CreateDescOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(CreateDescOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1208,15 +1214,20 @@ public:
   }
 };
 
-class ExpOpToVCPattern : public OpConversionPattern<spirv::CLExpOp> {
+class ExpOpToVCPattern : public ConvertXeGPUToSPIRVPattern<spirv::CLExpOp> {
 public:
-  using OpConversionPattern<spirv::CLExpOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<spirv::CLExpOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(spirv::CLExpOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
     // llvm::outs() << "\nExpOpToVCPattern: \n";
     VectorType vecType = op.getResult().getType().cast<VectorType>();
+    auto shape = vecType.getShape();
+    int nElems = 1;
+    for(auto s : shape){
+      nElems *= s;
+    }
     Type elemType = vecType.getElementType();
     auto src = adaptor.getOperand();
 
@@ -1232,7 +1243,7 @@ public:
     auto idx0 = rewriter.create<spirv::ConstantOp>(loc, i32Type, rewriter.getI32IntegerAttr(0));
     log2eVec =
         rewriter.create<spirv::VectorInsertDynamicOp>(loc, log2eVec, log2eConst, idx0);
-    SmallVector<int32_t, 32> indices(32, 0);
+    SmallVector<int32_t> indices(nElems, 0);
     log2eVec = rewriter.create<spirv::VectorShuffleOp>(
           loc, vecType, log2eVec, log2eVec, rewriter.getI32ArrayAttr(indices));
 
@@ -1255,9 +1266,9 @@ public:
   }
 };
 
-class FMaxOpToVCPattern : public OpConversionPattern<spirv::CLFMaxOp> {
+class FMaxOpToVCPattern : public ConvertXeGPUToSPIRVPattern<spirv::CLFMaxOp> {
 public:
-  using OpConversionPattern<spirv::CLFMaxOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<spirv::CLFMaxOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(spirv::CLFMaxOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1274,15 +1285,19 @@ public:
     auto lhs = adaptor.getLhs();
     auto rhs = adaptor.getRhs();
 
+    auto bitWidth = elemType.getIntOrFloatBitWidth();
+    int size = type.cast<VectorType>().getNumElements() * bitWidth / 32;
+    VectorType retType =  VectorType::get(size, elemType);
+
     std::string funcName = "llvm.genx.fmax.";
     funcName += encodeVectorType(rewriter, vecType, false).first;
     SmallVector<Value> args{lhs, rhs};
-    auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {vecType});
+    auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {retType});
 
     Operation *opPtr = op;
     lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
 
-    auto ret = rewriter.create<spirv::FunctionCallOp>(loc, ArrayRef<mlir::Type>{vecType},
+    auto ret = rewriter.create<spirv::FunctionCallOp>(loc, ArrayRef<mlir::Type>{retType},
                                                             funcName, args).getResults()[0];
     llvm::outs() << "\nFMaxOpToVCPattern ret: \n" << ret << "\n";
     rewriter.replaceOp(op, ret);
@@ -1291,9 +1306,9 @@ public:
   }
 };
 
-class AllocaOpToVCPattern : public OpConversionPattern<memref::AllocaOp> {
+class AllocaOpToVCPattern : public ConvertXeGPUToSPIRVPattern<memref::AllocaOp> {
 public:
-  using OpConversionPattern<memref::AllocaOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<memref::AllocaOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(memref::AllocaOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1323,9 +1338,9 @@ public:
   }
 };
 
-class ConstantOpToVCPattern : public OpConversionPattern<spirv::ConstantOp> {
+class ConstantOpToVCPattern : public ConvertXeGPUToSPIRVPattern<spirv::ConstantOp> {
 public:
-  using OpConversionPattern<spirv::ConstantOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<spirv::ConstantOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(spirv::ConstantOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1344,7 +1359,8 @@ public:
       auto newValue = denseValue.reshape(newType.cast<ShapedType>());
 
       Value constVal = rewriter.create<spirv::ConstantOp>(loc, newType, newValue);
-      Value ret = rewriter.create<spirv::BitcastOp>(loc, vectorType, constVal);
+      //Value ret = rewriter.create<spirv::BitcastOp>(loc, vectorType, constVal);
+      Value ret = constVal;
 
       rewriter.replaceOp(op, ret);
     }
@@ -1352,13 +1368,13 @@ public:
   }
 };
 
-class VectorShuffleToVCPattern : public OpConversionPattern<spirv::VectorShuffleOp> {
+class VectorShuffleToVCPattern : public ConvertXeGPUToSPIRVPattern<spirv::VectorShuffleOp> {
 public:
-  using OpConversionPattern<spirv::VectorShuffleOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<spirv::VectorShuffleOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(spirv::VectorShuffleOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {\
-    // llvm::outs() << "\n\n[VectorShuffleToVCPattern]\n";
+    llvm::outs() << "\n\n[VectorShuffleToVCPattern]\n";
     Location loc = op.getLoc();
 
     Value vector1 = adaptor.getVector1();
@@ -1366,10 +1382,8 @@ public:
     ::mlir::ArrayAttr components = op.getComponents();
     ::llvm::ArrayRef<Attribute> indices = components.getValue();
 
-    int offset = components[0].cast<IntegerAttr>().getInt() / 2;
-    int size = components.size() / 2;
-    SmallVector<int32_t, 2> newIndices(size);
-    std::iota(newIndices.begin(), newIndices.end(), offset);
+    int offset = components[0].cast<IntegerAttr>().getInt();
+    int size = components.size();
 
     Value result = op.getResult();
     VectorType retType = result.getType().cast<VectorType>();
@@ -1377,18 +1391,110 @@ public:
     auto elemType = retType.getElementType();
     auto bitWidth = elemType.getIntOrFloatBitWidth();
 
-    Type newType = VectorType::get(size, i32Type);
-    Value newVector = rewriter.create<spirv::VectorShuffleOp>(loc, newType, vector1, vector2, rewriter.getI32ArrayAttr(newIndices));
+    Type newType;
+    Value newVector;
+    if(bitWidth == 16){
+      offset /= 2;
+      size /= 2;
+      newType = VectorType::get(size, i32Type);
+      SmallVector<int32_t, 2> newIndices(size);
+      std::iota(newIndices.begin(), newIndices.end(), offset);
+      newVector = rewriter.create<spirv::VectorShuffleOp>(loc, newType, vector1, vector2, rewriter.getI32ArrayAttr(newIndices));
+    } else if(bitWidth == 32){
+      newType = VectorType::get(size, elemType);
 
+      llvm::outs() << "\n\n[VectorShuffleToVCPattern]old vector1: "<< vector1 <<"\n";
+      auto shape = vector1.getType().cast<VectorType>().getShape();
+      if(shape.size() >=2){
+        if(auto castOp = dyn_cast<vector::ShapeCastOp>(vector1.getDefiningOp())){
+          vector1 = castOp.getSource();
+        }
+        else{
+          int size1 = 1;
+          for(auto s: shape){
+            size1 *= s;
+          }
+          auto newVector1Type = VectorType::get(size1, elemType);
+          vector1 = rewriter.create<vector::ShapeCastOp>(loc, newVector1Type, vector1);
+        }
+      }
+      llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector1 shape.size(): "<< shape.size() <<"\n";
+      llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector1: "<< vector1 <<"\n";
 
+      llvm::outs() << "\n\n[VectorShuffleToVCPattern]old vector2: "<< vector2 <<"\n";
+      shape = vector2.getType().cast<VectorType>().getShape();
+      if(shape.size() >=2){
+        if(auto castOp = dyn_cast<vector::ShapeCastOp>(vector2.getDefiningOp())){
+          vector2 = castOp.getSource();
+        }
+        else{
+          int size2 = 1;
+          for(auto s: shape){
+            size2 *= s;
+          }
+          auto newVector2Type = VectorType::get(size2, elemType);
+          vector2 = rewriter.create<vector::ShapeCastOp>(loc, newVector2Type, vector2);
+        }
+      }
+      llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector2 shape.size(): "<< shape.size() <<"\n";
+      llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector2: "<< vector2 <<"\n";
+
+      newVector = rewriter.create<spirv::VectorShuffleOp>(loc, newType, vector1, vector2, components);
+
+      newVector = rewriter.create<vector::ShapeCastOp>(loc, retType, newVector);
+      llvm::outs() << "\n\n[VectorShuffleToVCPattern]newVector: "<< newVector <<"\n";
+    }
+
+    //llvm::outs() << "\n\n[VectorShuffleToVCPattern]newVector: "<< newVector <<"\n";
     rewriter.replaceOp(op, newVector);
     return success();
   }
 };
 
-class FConvertToVCPattern : public OpConversionPattern<spirv::FConvertOp> {
+class ShapeCastToVCPattern : public ConvertXeGPUToSPIRVPattern<vector::ShapeCastOp> {
 public:
-  using OpConversionPattern<spirv::FConvertOp>::OpConversionPattern;
+  using ConvertXeGPUToSPIRVPattern<vector::ShapeCastOp>::ConvertXeGPUToSPIRVPattern;
+  LogicalResult
+  matchAndRewrite(vector::ShapeCastOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {\
+    llvm::outs() << "\n\n[ShapeCastToVCPattern]\n";
+    Location loc = op.getLoc();
+    Value src = adaptor.getSource();
+
+    Value result = op.getResult();
+    VectorType retType = result.getType().cast<VectorType>();
+
+    auto elemType = retType.getElementType();
+    auto shape = retType.getShape();
+    auto rank = shape.size();
+    auto bitWidth = elemType.getIntOrFloatBitWidth();
+
+    int size = 1;
+    for(auto s: shape)
+      size *= s;
+
+    Value newVector;
+
+    if(shape[rank - 1] <= 2){
+      Type newType = VectorType::get(size, elemType);
+      newVector = rewriter.create<vector::ShapeCastOp>(loc, newType, src);
+
+      if(shape[rank - 1] == 2 && bitWidth == 16){
+        newType = VectorType::get(size / 2, i32Type);
+        newVector = rewriter.create<spirv::BitcastOp>(loc, newType, newVector);
+      }
+
+      llvm::outs() << "\n\n[ShapeCastToVCPattern]newVector: "<< newVector <<"\n";
+      rewriter.replaceOp(op, newVector);
+    }
+    return success();
+  }
+};
+
+
+class FConvertToVCPattern : public ConvertXeGPUToSPIRVPattern<spirv::FConvertOp> {
+public:
+  using ConvertXeGPUToSPIRVPattern<spirv::FConvertOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(spirv::FConvertOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
@@ -1439,7 +1545,7 @@ public:
 };
 
 void populateXeGPUToVCIntrinsicsPatterns(
-    SPIRVTypeConverter &typeConverter, RewritePatternSet &patterns) {
+    XeGPUToSPIRVTypeConverter &typeConverter, RewritePatternSet &patterns) {
   llvm::outs()<<"\n\npopulateXeGPUToVCIntrinsicsPatterns\n";
   patterns.add<DpasToVCPattern,
                AllocNbarrierToVCPattern, CreateNbarrierToVCPattern,
@@ -1456,7 +1562,8 @@ void populateXeGPUToVCIntrinsicsPatterns(
       typeConverter, patterns.getContext());
 
   // spirvOp that requires special handling
-  patterns.add<ConstantOpToVCPattern, VectorShuffleToVCPattern>(
+  patterns.add<ConstantOpToVCPattern, 
+               VectorShuffleToVCPattern, ShapeCastToVCPattern>(
       typeConverter, patterns.getContext());
 
   if (getenv("IMEX_NOT_PREFER_RAWSEND")){
