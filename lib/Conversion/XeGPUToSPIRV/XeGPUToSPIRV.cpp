@@ -49,6 +49,7 @@ Value createConstantI64(Location loc, PatternRewriter &rewriter, int64_t v) {
 }
 
 #define add(...) rewriter.create<spirv::IAddOp>(loc, __VA_ARGS__)
+#define udiv(...) rewriter.create<spirv::UDivOp>(loc, __VA_ARGS__)
 #define sub(...) rewriter.create<spirv::ISubOp>(loc, __VA_ARGS__)
 #define mul(...) rewriter.create<spirv::IMulOp>(loc, __VA_ARGS__)
 #define zext(...) rewriter.create<spirv::UConvertOp>(loc, __VA_ARGS__)
@@ -238,13 +239,14 @@ public:
   using ConvertXeGPUToSPIRVPattern<CreateNdDescOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(CreateNdDescOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {\
-    llvm::outs()<<"\n\n[CreateNdDescToVCPattern]\n";
+                  ConversionPatternRewriter &rewriter) const override {
+    // llvm::outs()<<"\n\n[CreateNdDescToVCPattern]\n";
     Location loc = op.getLoc();
     auto src = adaptor.getSource();
     Type type = src.getType();
 
     auto memoryScope = op.getMemoryScope();
+    auto order = op.getOrder();
     bool usingSLM = memoryScope == xegpu::MemoryScope::SLM;
 
     auto tileType = op.getTensorDesc().getType();
@@ -285,6 +287,11 @@ public:
       auto blockWidth = tileType.getShape()[1];
       auto blockHeight = tileType.getShape()[0];
 
+      if(order[0] == 0){
+        //todo Determine data type
+        blockWidth /= 2;
+      }
+
       // support i64 addr
       auto shape = adaptor.getShape();
       unsigned bitWidth = tileType.getElementType().getIntOrFloatBitWidth();
@@ -304,22 +311,27 @@ public:
         }
         return val;
       };
-      auto offsetX = createOffset(1);
-      auto offsetY = createOffset(0);
+
       payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
                                                               surfaceW, idx2);
       payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
                                                               surfaceH, idx3);
       payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
                                                               surfaceP, idx4);
-      payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
-                                                              offsetX, idx5);
-      payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
-                                                              offsetY, idx6);
       unsigned blockVal = ((blockHeight - 1) << 8) | (blockWidth - 1);
       auto blockInfo = createIntConstant(i32Type, blockVal);
       payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
                                                               blockInfo, idx7);
+
+      auto offsetX = createOffset(1);
+      if(order[0] == 0){
+        offsetX = udiv(offsetX, i32_val(2));
+      }
+      auto offsetY = createOffset(0);
+      payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
+                                                              offsetX, idx5);
+      payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
+                                                              offsetY, idx6);
     }
 
     rewriter.replaceOp(op, payLoad);
@@ -333,7 +345,7 @@ public:
   LogicalResult
   matchAndRewrite(UpdateNDOffsetOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern]\n";
+    // llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern]\n";
     Location loc = op.getLoc();
     auto payLoad = adaptor.getTensorDesc();
     auto offset = adaptor.getOffsets();
@@ -355,7 +367,6 @@ public:
     }
 
     if(auto *parentOp = offset[1].getDefiningOp()){
-      //llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] parentOp: "<<*parentOp<<"\n";
       if(auto castOp = dyn_cast<spirv::ConstantOp>(parentOp)){
         auto value = castOp.getValue().cast<IntegerAttr>().getValue().getZExtValue();
         constantOffset1 = 1;
@@ -379,17 +390,7 @@ public:
       offsets = rewriter.create<spirv::VectorInsertDynamicOp>(loc, offsets, offset[1], idx5);
     }
 
-    
-
     payLoad = add(payLoad, offsets);
-
-    // auto newOffsetX = add(offsetX, offset[1]);
-    // auto newOffsetY = add(offsetY, offset[0]);
-
-    // payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
-    //                                                         newOffsetX, idx5);
-    // payLoad = rewriter.create<spirv::VectorInsertDynamicOp>(loc, payLoad,
-    //                                                         newOffsetY, idx6);
 
     rewriter.replaceOp(op, payLoad);
     return success();
@@ -653,6 +654,13 @@ public:
     auto sfid = usingSLM ? createIntConstant(i8Type, 14) 
                       : createIntConstant(i8Type, 15); ;
     auto extMsg = createIntConstant(i32Type, 0);
+
+    //process transpose
+    if(transpose){
+      //process payload
+      elmType = i32Type;
+    }
+
     // message descriptor
     uint32_t rawSendMsg = 0;
     if (rank == 2) {
@@ -764,6 +772,39 @@ public:
     auto rhsType = op.getRhs().getType().cast<VectorType>();
     auto resultType = op.getResultType().cast<VectorType>();
 
+    Value lhs = adaptor.getLhs();
+    Value rhs = adaptor.getRhs();
+    VectorType newLhsType = lhs.getType().cast<VectorType>();
+    VectorType newRhsType = rhs.getType().cast<VectorType>();
+
+    // llvm::outs()<<"\n\n[DpasToVCPattern]lhs: " << lhs << "\n";
+    // llvm::outs()<<"\n\n[DpasToVCPattern]rhs: " << rhs << "\n";
+    // llvm::outs()<<"\n\n[DpasToVCPattern]newLhsType: " << newLhsType << "\n";
+    // llvm::outs()<<"\n\n[DpasToVCPattern]newRhsType: " << newRhsType << "\n";
+
+    if(auto *parentOp = lhs.getDefiningOp()){
+      if(auto castOp = dyn_cast<UnrealizedConversionCastOp>(parentOp)){
+        lhs = (&castOp)->getInputs()[0];
+      }
+    }
+
+    if(lhs.getType() != newLhsType){
+      lhs = rewriter.create<spirv::BitcastOp>(loc, newLhsType, lhs);
+    }
+
+    if(auto *parentOp = rhs.getDefiningOp()){
+      if(auto castOp = dyn_cast<UnrealizedConversionCastOp>(parentOp)){
+        rhs = (&castOp)->getInputs()[0];
+      }
+    }
+
+    if(rhs.getType() != newRhsType){
+      rhs = rewriter.create<spirv::BitcastOp>(loc, newRhsType, rhs);
+    }
+
+    // llvm::outs()<<"\n\n[DpasToVCPattern]lhs: " << lhs << "\n";
+    // llvm::outs()<<"\n\n[DpasToVCPattern]rhs: " << rhs << "\n";
+
     Type retType = this->getTypeConverter()->convertXeGPUVectorType(resultType);
 
     auto elemType = resultType.getElementType();
@@ -790,7 +831,7 @@ public:
     auto info = rewriter.create<spirv::ConstantOp>(loc, i32Type,
                                                    infoAttr);
     auto newResultType = encodeVectorType(rewriter, resultType).second;
-    SmallVector<Value, 4> args{adaptor.getRhs(), adaptor.getLhs(), info};
+    SmallVector<Value, 4> args{rhs, lhs, info};
     std::string funcName = "llvm_genx_dpas_nosrc0_";
     if (op.getAcc()) {
       funcName = "llvm_genx_dpas2_";
@@ -803,7 +844,7 @@ public:
       auto sdArg = createIntConstant(i32Type, sd);
       auto rcArg = createIntConstant(i32Type, rc);
       auto signless = createIntConstant(i32Type, 0);
-      args.assign({adaptor.getAcc(), adaptor.getRhs(), adaptor.getLhs(),
+      args.assign({adaptor.getAcc(), rhs, lhs,
                    prec1Arg, prec2Arg, sdArg, rcArg, signless, signless});
     }
     funcName += encodeVectorType(rewriter, resultType).first;
@@ -840,7 +881,7 @@ public:
     auto offsetType = type.dyn_cast<VectorType>();
     auto SIMD = offsetType.getNumElements();
 
-    llvm::outs()<<"\n\nmemory_scope: "<<memoryScope<<"\n";
+    llvm::outs()<<"\n\n[GatherScatterToRawSend]memory_scope: "<<memoryScope<<"\n";
     // llvm::outs()<<"\n\nSIMD : "<<SIMD<<"\n";
 
     auto tileType = op.getTensorDesc().getType();
@@ -971,12 +1012,12 @@ public:
       rewriter.create<spirv::FunctionCallOp>(loc, TypeRange(), funcName, args);
       rewriter.eraseOp(op);
     }
-    llvm::outs()<<"\n\nAfter GatherScatterToRawSend\n";
-    if(isa<StoreScatterOp>(op)){
-      Operation *opPtr = op;
-      auto mod = opPtr->getParentOfType<mlir::ModuleOp>();
-      mod->print(llvm::outs());
-    }
+    // llvm::outs()<<"\n\nAfter GatherScatterToRawSend\n";
+    // if(isa<StoreScatterOp>(op)){
+    //   Operation *opPtr = op;
+    //   auto mod = opPtr->getParentOfType<mlir::ModuleOp>();
+    //   mod->print(llvm::outs());
+    // }
     return success();
   }
 };
@@ -1266,7 +1307,7 @@ public:
   }
 };
 
-class FMaxOpToVCPattern : public ConvertXeGPUToSPIRVPattern<spirv::CLFMaxOp> {
+class SPIRVFMaxOpToVCPattern : public ConvertXeGPUToSPIRVPattern<spirv::CLFMaxOp> {
 public:
   using ConvertXeGPUToSPIRVPattern<spirv::CLFMaxOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
@@ -1374,7 +1415,7 @@ public:
   LogicalResult
   matchAndRewrite(spirv::VectorShuffleOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {\
-    llvm::outs() << "\n\n[VectorShuffleToVCPattern]\n";
+    // llvm::outs() << "\n\n[VectorShuffleToVCPattern]\n";
     Location loc = op.getLoc();
 
     Value vector1 = adaptor.getVector1();
@@ -1403,46 +1444,22 @@ public:
     } else if(bitWidth == 32){
       newType = VectorType::get(size, elemType);
 
-      llvm::outs() << "\n\n[VectorShuffleToVCPattern]old vector1: "<< vector1 <<"\n";
+      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]old vector1: "<< vector1 <<"\n";
       auto shape = vector1.getType().cast<VectorType>().getShape();
-      if(shape.size() >=2){
-        if(auto castOp = dyn_cast<vector::ShapeCastOp>(vector1.getDefiningOp())){
-          vector1 = castOp.getSource();
-        }
-        else{
-          int size1 = 1;
-          for(auto s: shape){
-            size1 *= s;
-          }
-          auto newVector1Type = VectorType::get(size1, elemType);
-          vector1 = rewriter.create<vector::ShapeCastOp>(loc, newVector1Type, vector1);
-        }
-      }
-      llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector1 shape.size(): "<< shape.size() <<"\n";
-      llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector1: "<< vector1 <<"\n";
 
-      llvm::outs() << "\n\n[VectorShuffleToVCPattern]old vector2: "<< vector2 <<"\n";
+      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector1 shape.size(): "<< shape.size() <<"\n";
+      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector1: "<< vector1 <<"\n";
+
+      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]old vector2: "<< vector2 <<"\n";
       shape = vector2.getType().cast<VectorType>().getShape();
-      if(shape.size() >=2){
-        if(auto castOp = dyn_cast<vector::ShapeCastOp>(vector2.getDefiningOp())){
-          vector2 = castOp.getSource();
-        }
-        else{
-          int size2 = 1;
-          for(auto s: shape){
-            size2 *= s;
-          }
-          auto newVector2Type = VectorType::get(size2, elemType);
-          vector2 = rewriter.create<vector::ShapeCastOp>(loc, newVector2Type, vector2);
-        }
-      }
-      llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector2 shape.size(): "<< shape.size() <<"\n";
-      llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector2: "<< vector2 <<"\n";
+
+      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector2 shape.size(): "<< shape.size() <<"\n";
+      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector2: "<< vector2 <<"\n";
 
       newVector = rewriter.create<spirv::VectorShuffleOp>(loc, newType, vector1, vector2, components);
 
-      newVector = rewriter.create<vector::ShapeCastOp>(loc, retType, newVector);
-      llvm::outs() << "\n\n[VectorShuffleToVCPattern]newVector: "<< newVector <<"\n";
+      // newVector = rewriter.create<vector::ShapeCastOp>(loc, retType, newVector);
+      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]newVector: "<< newVector <<"\n";
     }
 
     //llvm::outs() << "\n\n[VectorShuffleToVCPattern]newVector: "<< newVector <<"\n";
@@ -1456,41 +1473,15 @@ public:
   using ConvertXeGPUToSPIRVPattern<vector::ShapeCastOp>::ConvertXeGPUToSPIRVPattern;
   LogicalResult
   matchAndRewrite(vector::ShapeCastOp op, OpAdaptor adaptor,
-                  ConversionPatternRewriter &rewriter) const override {\
+                  ConversionPatternRewriter &rewriter) const override {
     llvm::outs() << "\n\n[ShapeCastToVCPattern]\n";
     Location loc = op.getLoc();
     Value src = adaptor.getSource();
 
-    Value result = op.getResult();
-    VectorType retType = result.getType().cast<VectorType>();
-
-    auto elemType = retType.getElementType();
-    auto shape = retType.getShape();
-    auto rank = shape.size();
-    auto bitWidth = elemType.getIntOrFloatBitWidth();
-
-    int size = 1;
-    for(auto s: shape)
-      size *= s;
-
-    Value newVector;
-
-    if(shape[rank - 1] <= 2){
-      Type newType = VectorType::get(size, elemType);
-      newVector = rewriter.create<vector::ShapeCastOp>(loc, newType, src);
-
-      if(shape[rank - 1] == 2 && bitWidth == 16){
-        newType = VectorType::get(size / 2, i32Type);
-        newVector = rewriter.create<spirv::BitcastOp>(loc, newType, newVector);
-      }
-
-      llvm::outs() << "\n\n[ShapeCastToVCPattern]newVector: "<< newVector <<"\n";
-      rewriter.replaceOp(op, newVector);
-    }
+    rewriter.replaceOp(op, src);
     return success();
   }
 };
-
 
 class FConvertToVCPattern : public ConvertXeGPUToSPIRVPattern<spirv::FConvertOp> {
 public:
@@ -1544,6 +1535,153 @@ public:
   }
 };
 
+class BroadcastToVCPattern final
+    : public ConvertXeGPUToSPIRVPattern<vector::BroadcastOp> {
+  using ConvertXeGPUToSPIRVPattern::ConvertXeGPUToSPIRVPattern;
+
+  LogicalResult
+  matchAndRewrite(vector::BroadcastOp castOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = castOp.getLoc();
+    llvm::outs() << "\n\n[BroadcastToVCPattern]\n";
+    Type resultType =
+        getTypeConverter()->convertType(castOp.getResultVectorType());
+    //llvm::outs() << "\n\n[BroadcastToVCPattern]resultType: " << resultType << "\n";
+    if (!resultType)
+      return failure();
+
+    if (isa<spirv::ScalarType>(resultType)) {
+      rewriter.replaceOp(castOp, adaptor.getSource());
+      return success();
+    }
+
+    SmallVector<Value, 4> source(castOp.getResultVectorType().getNumElements(),
+                                 adaptor.getSource());
+    Value ret = rewriter.create<spirv::CompositeConstructOp>(loc, resultType, source);
+    //llvm::outs() << "\n\n[BroadcastToVCPattern]ret: " <<ret<<"\n";
+    rewriter.replaceOp(castOp, ret);
+    return success();
+  }
+};
+
+class VectorInsertDynamicToVCPattern final
+    : public ConvertXeGPUToSPIRVPattern<spirv::VectorInsertDynamicOp> {
+  using ConvertXeGPUToSPIRVPattern::ConvertXeGPUToSPIRVPattern;
+
+  LogicalResult
+  matchAndRewrite(spirv::VectorInsertDynamicOp insertOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = insertOp.getLoc();
+    llvm::outs() << "\n\n[VectorInsertDynamicToVCPattern]\n";
+    Type resultType =
+        getTypeConverter()->convertType(insertOp.getResult().getType());
+
+    if (!resultType)
+      return failure();
+
+    Value vector = adaptor.getVector();
+    Value component = adaptor.getComponent();
+    Value index = adaptor.getIndex();
+
+    Value ret = rewriter.create<spirv::VectorInsertDynamicOp>(
+                    loc, resultType, vector, component, index);
+
+    rewriter.replaceOp(insertOp, ret);
+    return success();
+  }
+};
+
+class UndefOpToVCPattern final
+    : public ConvertXeGPUToSPIRVPattern<spirv::UndefOp> {
+  using ConvertXeGPUToSPIRVPattern::ConvertXeGPUToSPIRVPattern;
+
+  LogicalResult
+  matchAndRewrite(spirv::UndefOp undefOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = undefOp.getLoc();
+    llvm::outs() << "\n\n[UndefOpToVCPattern]\n";
+    Type resultType =
+        getTypeConverter()->convertType(undefOp.getResult().getType());
+
+    if (!resultType)
+      return failure();
+
+    Value ret = rewriter.create<spirv::UndefOp>(loc, resultType);
+
+    rewriter.replaceOp(undefOp, ret);
+    return success();
+  }
+};
+
+class FAddOpToVCPattern final
+    : public ConvertXeGPUToSPIRVPattern<spirv::FAddOp> {
+  using ConvertXeGPUToSPIRVPattern::ConvertXeGPUToSPIRVPattern;
+
+  LogicalResult
+  matchAndRewrite(spirv::FAddOp faddOp, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    Location loc = faddOp.getLoc();
+    llvm::outs() << "\n\n[FAddOpToVCPattern]\n";
+    Type resultType =
+        getTypeConverter()->convertType(faddOp.getResult().getType());
+
+    if (!resultType)
+      return failure();
+
+    Value rhs = adaptor.getOperand1();
+    Value lhs = adaptor.getOperand2();
+    Value ret = rewriter.create<spirv::FAddOp>(loc, resultType, rhs, lhs);
+
+    rewriter.replaceOp(faddOp, ret);
+    return success();
+  }
+};
+
+class ExternElementwiseOpToVCPattern : public OpConversionPattern<triton::ExternElementwiseOp> {
+public:
+  using OpConversionPattern<triton::ExternElementwiseOp>::OpConversionPattern;
+  LogicalResult
+  matchAndRewrite(triton::ExternElementwiseOp op, OpAdaptor adaptor,
+                  ConversionPatternRewriter &rewriter) const override {
+    llvm::outs()<<"\n\n[ExternElementwiseOpToVCPattern]: \n";
+    auto loc = op->getLoc();
+
+    auto func = op.getSymbol();
+    llvm::outs()<<"\n\n[ExternElementwiseOpToVCPattern]func: " << func <<"\n";
+
+    auto src = adaptor.getArgs();
+    auto type = op.getResult().getType();
+    VectorType vecType = type.cast<VectorType>();
+    Type elemType = vecType.getElementType();
+    auto bitWidth = elemType.getIntOrFloatBitWidth();
+    int size = vecType.getNumElements() * bitWidth / 32;
+    VectorType retType =  VectorType::get(size, elemType);
+
+    std::string funcName;
+    if(func=="__nv_log2f"){
+      funcName = "llvm.genx.log.";
+    }else if(func=="__nv_exp2f"){
+      funcName = "llvm.genx.exp.";
+    }else{
+
+    }
+
+    funcName += encodeVectorType(rewriter, vecType, false).first;
+    SmallVector<Value> args{src};
+    auto funcType = rewriter.getFunctionType(ValueRange(args).getTypes(), {retType});
+
+    Operation *opPtr = op;
+    lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
+
+    auto ret = rewriter.create<spirv::FunctionCallOp>(loc, ArrayRef<mlir::Type>{retType},
+                                                            funcName, args).getResults()[0];
+    llvm::outs() << "\nFMaxOpToVCPattern ret: \n" << ret << "\n";
+    rewriter.replaceOp(op, ret);
+    llvm::outs()<<"\n\n[ExternElementwiseOpToVCPattern]ret: " << ret <<"\n";
+    return success();
+  }
+};
+
 void populateXeGPUToVCIntrinsicsPatterns(
     XeGPUToSPIRVTypeConverter &typeConverter, RewritePatternSet &patterns) {
   llvm::outs()<<"\n\npopulateXeGPUToVCIntrinsicsPatterns\n";
@@ -1558,12 +1696,20 @@ void populateXeGPUToVCIntrinsicsPatterns(
       typeConverter, patterns.getContext());
 
   // math function
-  patterns.add<ExpOpToVCPattern, FMaxOpToVCPattern, FConvertToVCPattern>(
+  patterns.add<ExpOpToVCPattern, SPIRVFMaxOpToVCPattern, 
+               FAddOpToVCPattern, FConvertToVCPattern>(
       typeConverter, patterns.getContext());
 
   // spirvOp that requires special handling
-  patterns.add<ConstantOpToVCPattern, 
-               VectorShuffleToVCPattern, ShapeCastToVCPattern>(
+  patterns.add<ConstantOpToVCPattern, VectorInsertDynamicToVCPattern,
+               VectorShuffleToVCPattern, UndefOpToVCPattern>(
+      typeConverter, patterns.getContext());
+
+  // vector function
+  patterns.add<ShapeCastToVCPattern, BroadcastToVCPattern>(
+      typeConverter, patterns.getContext());
+
+  patterns.add<ExternElementwiseOpToVCPattern>(
       typeConverter, patterns.getContext());
 
   if (getenv("IMEX_NOT_PREFER_RAWSEND")){

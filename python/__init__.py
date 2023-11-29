@@ -246,13 +246,13 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
   uint32_t num_params = sizeof(params)/sizeof(params[0]);
   uint32_t expected_num_params = kernel_ptr.get_info<sycl::info::kernel::num_args>();
 
-  size_t global_range_x = gridX*32;
+  size_t global_range_x = gridX * 8;
   //size_t global_range_x = 32;
   size_t global_range_y = gridY;
   size_t global_range_z = gridZ;
 
   //size_t local_range_x = num_warps*threads_per_warp;
-  size_t local_range_x = 32;
+  size_t local_range_x = 8;
   size_t local_range_y = 1;
   size_t local_range_z = 1;
 
@@ -260,7 +260,7 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
   sycl::range<3> local_range(local_range_z, local_range_y, local_range_x);
   sycl::nd_range<3> parallel_work_size(global_range, local_range);
 
-  if (getBoolEnv("MLIR_ENABLE_DUMP")){{
+  if (1 || getBoolEnv("MLIR_ENABLE_DUMP")){{
     std::cout << "kernel info name:" << kernel_name << " @" << &kernel_ptr << std::endl;
     std::cout << "kernel info attributes:" << kernel_ptr.get_info<sycl::info::kernel::attributes>() << std::endl;
     std::cout << "kernel info reference_count:" << kernel_ptr.get_info<sycl::info::kernel::reference_count>() << std::endl;

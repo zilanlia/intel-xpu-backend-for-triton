@@ -17,7 +17,7 @@ public:
 
   Type convertXeGPUMemRefType(mlir::MemRefType type);
 
-  Type convertXeGPUVectorType(mlir::VectorType type);
+  mlir::VectorType convertXeGPUVectorType(mlir::VectorType type);
 };
 
 #endif

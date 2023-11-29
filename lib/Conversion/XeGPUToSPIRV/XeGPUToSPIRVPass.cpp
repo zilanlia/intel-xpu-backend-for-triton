@@ -45,6 +45,7 @@
 
 using namespace mlir;
 using namespace mlir::triton;
+using namespace mlir::spirv;
 // using namespace mlir::triton::xegpu;
 
 #define GEN_PASS_CLASSES
@@ -69,6 +70,7 @@ public:
     addIllegalDialect<mlir::gpu::GPUDialect>();
     addIllegalDialect<::mlir::arith::ArithDialect>();
     addIllegalDialect<::mlir::vector::VectorDialect>();
+    addIllegalDialect<::mlir::scf::SCFDialect>();
     addIllegalDialect<::mlir::memref::MemRefDialect>();
     addLegalDialect<spirv::SPIRVDialect>();
     addLegalOp<UnrealizedConversionCastOp>();
@@ -97,32 +99,62 @@ public:
 
     addDynamicallyLegalOp<spirv::VectorShuffleOp>([](spirv::VectorShuffleOp op) -> bool {
       Value vector1 = op.getVector1();
-      Type type = vector1.getType();
+      Value vector2 = op.getVector2();
+      Value result = op.getResult();
+      Type vector1Type = vector1.getType();
+      Type vector2Type = vector2.getType();
+      Type resultType = result.getType();
 
-      if(auto vectorType = type.cast<VectorType>()){
-        auto shape = vectorType.getShape();
-        // convert 2d constatn val to 1D to avoid error for spirv
-        if(shape.size() >= 2){
-          return false;
-        }
+      auto vector1Shape = vector1Type.cast<VectorType>().getShape();
+      auto vector2Shape = vector2Type.cast<VectorType>().getShape();
+      auto resultShape = resultType.cast<VectorType>().getShape();
+      // convert 2d constatn val to 1D to avoid error for spirv
+      if(vector1Shape.size() >= 2 || vector2Shape.size() >= 2 || resultShape.size() >= 2){
+        return false;
       }
-      
+
       return true;
     });
 
     addDynamicallyLegalOp<vector::ShapeCastOp>([](vector::ShapeCastOp op) -> bool {
+      Value src = op.getSource();
       Value result = op.getResult();
-      Type type = result.getType();
-      llvm::outs() << "\n\n[addDynamicallyLegalOp] result: " << result << "\n";
+      Type srcType = src.getType();
+      Type retType = result.getType();
 
-      if(auto vectorType = type.cast<VectorType>()){
-        auto shape = vectorType.getShape();
+      if(isa<VectorType>(srcType)){
+      auto srcShape = srcType.cast<VectorType>().getShape();
+      auto retShape = retType.cast<VectorType>().getShape();
         // convert 2d constatn val to 1D to avoid error for spirv
-        if(shape.size() >= 2){
+        if(srcShape.size() >= 2 || retShape.size() >= 2){
           return false;
         }
       }
-      llvm::outs() << "\n\n[addDynamicallyLegalOp] true\n";
+
+      return true;
+    });
+
+    addDynamicallyLegalOp<VectorInsertDynamicOp>([](VectorInsertDynamicOp op) -> bool {
+      Value result = op.getResult();
+      Type retType = result.getType();
+      auto retShape = retType.cast<VectorType>().getShape();
+      return retShape.size() == 1;
+    });
+
+    addDynamicallyLegalOp<UndefOp>([](UndefOp op) -> bool {
+      Value result = op.getResult();
+      Type retType = result.getType();
+      auto retShape = retType.cast<VectorType>().getShape();
+      return retShape.size() == 1;
+    });
+
+    addDynamicallyLegalOp<FAddOp>([](spirv::FAddOp op) -> bool {
+      Value result = op.getResult();
+      Type retType = result.getType();
+      if(isa<VectorType>(retType)){
+        auto retShape = retType.cast<VectorType>().getShape();
+        return retShape.size() == 1;
+      }
       return true;
     });
   }
@@ -303,6 +335,8 @@ void GPUXToSPIRVPass::runOnOperation() {
     mlir::OpBuilder builder(gpuModule);
     llvm::SmallVector<mlir::Operation *, 16> eraseOps;
 
+    populateXeGPUToVCIntrinsicsPatterns(typeConverter, patterns);
+
     //------- Upstream Conversion------------
     mlir::populateGPUToSPIRVPatterns(typeConverter, patterns);
     mlir::arith::populateArithToSPIRVPatterns(typeConverter, patterns);
@@ -316,7 +350,7 @@ void GPUXToSPIRVPass::runOnOperation() {
     mlir::cf::populateControlFlowToSPIRVPatterns(typeConverter, patterns);
     mlir::populateMathToSPIRVPatterns(typeConverter, patterns);
     mlir::populateVectorToSPIRVPatterns(typeConverter, patterns);
-    populateXeGPUToVCIntrinsicsPatterns(typeConverter, patterns);
+
 
     if (failed(applyPartialConversion(gpuModule, spirvTarget, std::move(patterns)))){
       return signalPassFailure();

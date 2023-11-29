@@ -63,6 +63,16 @@ XeGPUToSPIRVTypeConverter::XeGPUToSPIRVTypeConverter(
     return builder.create<UnrealizedConversionCastOp>(loc, resultType, inputs)
             .getResult(0);
   });
+
+  addArgumentMaterialization([&](OpBuilder &builder, Type resultType,
+                               ValueRange inputs,
+                               Location loc) -> Optional<Value> {
+    if (inputs.size() != 1)
+      return std::nullopt;
+
+    return builder.create<UnrealizedConversionCastOp>(loc, resultType, inputs)
+            .getResult(0);
+  });
 }
 
 Type XeGPUToSPIRVTypeConverter::convertXeGPUMemRefType(
@@ -75,7 +85,7 @@ Type XeGPUToSPIRVTypeConverter::convertXeGPUMemRefType(
   return ret;
 }
 
-Type XeGPUToSPIRVTypeConverter::convertXeGPUVectorType(
+VectorType XeGPUToSPIRVTypeConverter::convertXeGPUVectorType(
         VectorType type)  {
   auto elemType = type.getElementType();
   auto bitWidth = elemType.getIntOrFloatBitWidth();
