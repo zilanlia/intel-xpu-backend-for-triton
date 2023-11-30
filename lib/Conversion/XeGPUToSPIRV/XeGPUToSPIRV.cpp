@@ -27,51 +27,14 @@
 #include <mlir/IR/PatternMatch.h>
 #include <mlir/Support/LLVM.h>
 #include <mlir/Transforms/DialectConversion.h>
-
 #include <mlir/Pass/Pass.h>
-
 #include <numeric>
+
+#include "Utility.h"
 
 using namespace mlir;
 using namespace mlir::triton::xegpu;
 using namespace mlir::triton;
-
-Value createConstantI32(Location loc, PatternRewriter &rewriter, int32_t v) {
-  auto i32ty = rewriter.getIntegerType(32);
-  return rewriter.create<spirv::ConstantOp>(loc, i32ty,
-                                           IntegerAttr::get(i32ty, v));
-}
-
-Value createConstantI64(Location loc, PatternRewriter &rewriter, int64_t v) {
-  auto i64ty = rewriter.getIntegerType(64);
-  return rewriter.create<spirv::ConstantOp>(loc, i64ty,
-                                           IntegerAttr::get(i64ty, v));
-}
-
-#define add(...) rewriter.create<spirv::IAddOp>(loc, __VA_ARGS__)
-#define udiv(...) rewriter.create<spirv::UDivOp>(loc, __VA_ARGS__)
-#define sub(...) rewriter.create<spirv::ISubOp>(loc, __VA_ARGS__)
-#define mul(...) rewriter.create<spirv::IMulOp>(loc, __VA_ARGS__)
-#define zext(...) rewriter.create<spirv::UConvertOp>(loc, __VA_ARGS__)
-#define i1Type rewriter.getI1Type()
-#define i8Type rewriter.getI8Type()
-#define i16Type rewriter.getI16Type()
-#define i32Type rewriter.getI32Type()
-#define i64Type rewriter.getI64Type()
-#define f16Type rewriter.getF16Type()
-#define f32Type rewriter.getF32Type()
-#define f64Type rewriter.getF64Type()
-#define bf16Type rewriter.getBF16Type()
-#define v8i32 VectorType::get(8, i32Type)
-#define v4i64 VectorType::get(4, i64Type)
-#define logic_shl(...) rewriter.create<spirv::ShiftLeftLogicalOp>(loc, __VA_ARGS__)
-#define bitwise_or(...) rewriter.create<spirv::BitwiseOrOp>(loc, __VA_ARGS__)
-#define bitwise_and(...) rewriter.create<spirv::BitwiseAndOp>(loc, __VA_ARGS__)
-#define i32_val(...) createConstantI32(loc, rewriter, __VA_ARGS__)
-#define i64_val(...) createConstantI64(loc, rewriter, __VA_ARGS__)
-#define i16_val(value) rewriter.create<spirv::ConstantOp>(loc, rewriter.getIntegerType(16), rewriter.getI16IntegerAttr(value))
-#define i8_val(value) rewriter.create<spirv::ConstantOp>(loc, rewriter.getIntegerType(8), rewriter.getI8IntegerAttr(value))
-#define i1_val(value) rewriter.create<spirv::ConstantOp>(loc, rewriter.getI1Type(), rewriter.getBoolAttr(value))
 
 /// @brief encodeVectorType(xxx, 8x8x2xf16, true) returns ["v64i32", 64xi32]
 std::pair<std::string, VectorType>
@@ -80,7 +43,7 @@ encodeVectorType(ConversionPatternRewriter &rewriter, VectorType type,
   auto elemType = type.getElementType();
   auto bitWidth = elemType.getIntOrFloatBitWidth();
   int size = type.getNumElements() * bitWidth / 32;
-  // llvm::outs() << "\n\n[encodeVectorType]type: " <<type<<"\n";
+  // dbgInfo("[encodeVectorType]type", type);
   if (use64bitData) {
     size /= 2;
   }
@@ -240,7 +203,7 @@ public:
   LogicalResult
   matchAndRewrite(CreateNdDescOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // llvm::outs()<<"\n\n[CreateNdDescToVCPattern]\n";
+    // dbgInfo("[CreateNdDescToVCPattern]");
     Location loc = op.getLoc();
     auto src = adaptor.getSource();
     Type type = src.getType();
@@ -345,7 +308,7 @@ public:
   LogicalResult
   matchAndRewrite(UpdateNDOffsetOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern]\n";
+    // dbgInfo("[UpdateNDOffsetToVCPattern]");
     Location loc = op.getLoc();
     auto payLoad = adaptor.getTensorDesc();
     auto offset = adaptor.getOffsets();
@@ -358,7 +321,7 @@ public:
     bool constantOffset1 = 0;
 
     if(auto *parentOp = offset[0].getDefiningOp()){
-      //llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] parentOp: "<<*parentOp<<"\n";
+      //dbgInfo("[UpdateNDOffsetToVCPattern] parentOp", *parentOp);
       if(auto castOp = dyn_cast<spirv::ConstantOp>(parentOp)){
         auto value = castOp.getValue().cast<IntegerAttr>().getValue().getZExtValue();
         constantOffset0 = 1;
@@ -374,8 +337,8 @@ public:
       }
     }
 
-    //llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] constantOffset0: "<<constantOffset0<<"\n";
-    //llvm::outs()<<"\n\n[UpdateNDOffsetToVCPattern] constantOffset1: "<<constantOffset1<<"\n";
+    //dbgInfo("[UpdateNDOffsetToVCPattern] constantOffset0", constantOffset0);
+    //dbgInfo("[UpdateNDOffsetToVCPattern] constantOffset1", constantOffset1);
 
     Value offsets = rewriter.create<spirv::UndefOp>(loc, v8i32);
     auto idx0 = i32_val(0);
@@ -588,7 +551,7 @@ public:
   LogicalResult
   matchAndRewrite(OpType op, typename OpType::Adaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // llvm::outs()<<"\n\nLoadStorePrefetchNdToRawSend: "<<"\n";
+    // dbgInfo("LoadStorePrefetchNdToRawSend");
     auto payLoad = adaptor.getTensorDesc();
     auto createDescOp = findDescOp(op.template getTensorDesc());
     auto memoryScope = createDescOp.getMemoryScope();
@@ -731,7 +694,7 @@ public:
 
           data = rewriter.create<mlir::UnrealizedConversionCastOp>(loc, type, data)->getResults()[0];
           args.push_back(data);
-          // llvm::outs() << "adaptor.getValue()"<<adaptor.getValue()<<"\n";
+          // llvm::outs() << "adaptor.getValue()"<<adaptor.getValue());
         } else if (rank == 1) {
           if(adaptor.getValue().getType() != newType){
             auto cast = rewriter.create<spirv::BitcastOp>(loc, newType,
@@ -751,7 +714,7 @@ public:
     }
     
     // if(isa<StoreNDOp>(op)){
-    //   llvm::outs()<<"\n\nAfter store\n";
+    //   dbgInfo("After store");
     //   Operation *opPtr = op;
     //   auto mod = opPtr->getParentOfType<mlir::ModuleOp>();
     //   mod->print(llvm::outs());
@@ -766,7 +729,7 @@ public:
   LogicalResult
   matchAndRewrite(DpasOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    llvm::outs()<<"\n\n[DpasToVCPattern]\n";
+    dbgInfo("[DpasToVCPattern]");
     auto loc = op.getLoc();
     auto lhsType = op.getLhs().getType().cast<VectorType>();
     auto rhsType = op.getRhs().getType().cast<VectorType>();
@@ -777,10 +740,10 @@ public:
     VectorType newLhsType = lhs.getType().cast<VectorType>();
     VectorType newRhsType = rhs.getType().cast<VectorType>();
 
-    // llvm::outs()<<"\n\n[DpasToVCPattern]lhs: " << lhs << "\n";
-    // llvm::outs()<<"\n\n[DpasToVCPattern]rhs: " << rhs << "\n";
-    // llvm::outs()<<"\n\n[DpasToVCPattern]newLhsType: " << newLhsType << "\n";
-    // llvm::outs()<<"\n\n[DpasToVCPattern]newRhsType: " << newRhsType << "\n";
+    // dbgInfo("[DpasToVCPattern]lhs", lhs);
+    // dbgInfo("[DpasToVCPattern]rhs", rhs);
+    // dbgInfo("[DpasToVCPattern]newLhsType", newLhsType);
+    // dbgInfo("[DpasToVCPattern]newRhsType", newRhsType);
 
     if(auto *parentOp = lhs.getDefiningOp()){
       if(auto castOp = dyn_cast<UnrealizedConversionCastOp>(parentOp)){
@@ -802,8 +765,8 @@ public:
       rhs = rewriter.create<spirv::BitcastOp>(loc, newRhsType, rhs);
     }
 
-    // llvm::outs()<<"\n\n[DpasToVCPattern]lhs: " << lhs << "\n";
-    // llvm::outs()<<"\n\n[DpasToVCPattern]rhs: " << rhs << "\n";
+    // dbgInfo("[DpasToVCPattern]lhs", lhs);
+    // dbgInfo("[DpasToVCPattern]rhs", rhs);
 
     Type retType = this->getTypeConverter()->convertXeGPUVectorType(resultType);
 
@@ -881,8 +844,7 @@ public:
     auto offsetType = type.dyn_cast<VectorType>();
     auto SIMD = offsetType.getNumElements();
 
-    llvm::outs()<<"\n\n[GatherScatterToRawSend]memory_scope: "<<memoryScope<<"\n";
-    // llvm::outs()<<"\n\nSIMD : "<<SIMD<<"\n";
+    dbgInfo("[GatherScatterToRawSend]memory_scope", int(memoryScope));
 
     auto tileType = op.getTensorDesc().getType();
     auto rank = tileType.getRank();
@@ -1012,7 +974,7 @@ public:
       rewriter.create<spirv::FunctionCallOp>(loc, TypeRange(), funcName, args);
       rewriter.eraseOp(op);
     }
-    // llvm::outs()<<"\n\nAfter GatherScatterToRawSend\n";
+    // dbgInfo("After GatherScatterToRawSend");
     // if(isa<StoreScatterOp>(op)){
     //   Operation *opPtr = op;
     //   auto mod = opPtr->getParentOfType<mlir::ModuleOp>();
@@ -1032,12 +994,12 @@ public:
     auto countOp = nbarrier_count.getDefiningOp<arith::ConstantOp>();
     auto value = countOp.getValue().cast<IntegerAttr>();
     int32_t count = value.getValue().getZExtValue();
-    llvm::outs()<<"\n\ncount: "<<count<<"\n";
+    dbgInfo("count", count);
 
     ModuleOp sprivModule = op->getParentOfType<ModuleOp>();
 
     // to be fixed: will add mutiple attr for each func
-    // llvm::outs()<<"\n\nsprivModule: "<<sprivModule<<"\n";
+    // dbgInfo("sprivModule", sprivModule);
 
     // sprivModule.walk([&](spirv::FuncOp funcOp){
     //   auto spirvModule = funcOp->getParentOfType<ModuleOp>();
@@ -1262,7 +1224,7 @@ public:
   matchAndRewrite(spirv::CLExpOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
-    // llvm::outs() << "\nExpOpToVCPattern: \n";
+    // dbgInfo("ExpOpToVCPattern");
     VectorType vecType = op.getResult().getType().cast<VectorType>();
     auto shape = vecType.getShape();
     int nElems = 1;
@@ -1313,7 +1275,7 @@ public:
   LogicalResult
   matchAndRewrite(spirv::CLFMaxOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    // llvm::outs() << "\nFMaxOpToVCPattern: \n";
+    // dbgInfo("FMaxOpToVCPattern");
     auto loc = op.getLoc();
     auto type = op.getResult().getType();
     //  process v1
@@ -1340,7 +1302,7 @@ public:
 
     auto ret = rewriter.create<spirv::FunctionCallOp>(loc, ArrayRef<mlir::Type>{retType},
                                                             funcName, args).getResults()[0];
-    llvm::outs() << "\nFMaxOpToVCPattern ret: \n" << ret << "\n";
+    dbgInfo("FMaxOpToVCPattern ret", ret);
     rewriter.replaceOp(op, ret);
 
     return success();
@@ -1386,7 +1348,7 @@ public:
   matchAndRewrite(spirv::ConstantOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     auto loc = op.getLoc();
-    // llvm::outs() << "\n\nConstantOpToVCPattern\n";
+    // dbgInfo("ConstantOpToVCPattern");
     ::mlir::Attribute value = adaptor.getValue();
     DenseElementsAttr denseValue = dyn_cast<DenseElementsAttr>(value);
     auto type = denseValue.getType();
@@ -1415,7 +1377,7 @@ public:
   LogicalResult
   matchAndRewrite(spirv::VectorShuffleOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {\
-    // llvm::outs() << "\n\n[VectorShuffleToVCPattern]\n";
+    // dbgInfo("[VectorShuffleToVCPattern]");
     Location loc = op.getLoc();
 
     Value vector1 = adaptor.getVector1();
@@ -1444,25 +1406,25 @@ public:
     } else if(bitWidth == 32){
       newType = VectorType::get(size, elemType);
 
-      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]old vector1: "<< vector1 <<"\n";
+      // dbgInfo("[VectorShuffleToVCPattern]old vector1", vector1 );
       auto shape = vector1.getType().cast<VectorType>().getShape();
 
-      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector1 shape.size(): "<< shape.size() <<"\n";
-      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector1: "<< vector1 <<"\n";
+      // dbgInfo("[VectorShuffleToVCPattern]vector1 shape.size()", shape.size());
+      // dbgInfo("[VectorShuffleToVCPattern]vector1",  vector1 );
 
-      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]old vector2: "<< vector2 <<"\n";
+      // dbgInfo("[VectorShuffleToVCPattern]old vector2",  vector2 );
       shape = vector2.getType().cast<VectorType>().getShape();
 
-      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector2 shape.size(): "<< shape.size() <<"\n";
-      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]vector2: "<< vector2 <<"\n";
+      // dbgInfo("[VectorShuffleToVCPattern]vector2 shape.size()", shape.size());
+      // dbgInfo("[VectorShuffleToVCPattern]vector2",  vector2 );
 
       newVector = rewriter.create<spirv::VectorShuffleOp>(loc, newType, vector1, vector2, components);
 
       // newVector = rewriter.create<vector::ShapeCastOp>(loc, retType, newVector);
-      // llvm::outs() << "\n\n[VectorShuffleToVCPattern]newVector: "<< newVector <<"\n";
+      // dbgInfo("[VectorShuffleToVCPattern]newVector", newVector);
     }
 
-    //llvm::outs() << "\n\n[VectorShuffleToVCPattern]newVector: "<< newVector <<"\n";
+    //dbgInfo("[VectorShuffleToVCPattern]newVector", newVector);
     rewriter.replaceOp(op, newVector);
     return success();
   }
@@ -1474,7 +1436,7 @@ public:
   LogicalResult
   matchAndRewrite(vector::ShapeCastOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    llvm::outs() << "\n\n[ShapeCastToVCPattern]\n";
+    dbgInfo("[ShapeCastToVCPattern]");
     Location loc = op.getLoc();
     Value src = adaptor.getSource();
 
@@ -1498,8 +1460,8 @@ public:
     auto retType = result.getType().cast<VectorType>();
     auto retElemType = retType.getElementType();
 
-    // llvm::outs() << "\n\nsrcType: " << srcType << "\n";
-    // llvm::outs() << "\n\nretType: " << retType << "\n";
+    // dbgInfo("srcType",  srcType);
+    // dbgInfo("retType",  retType);
 
     if((srcElemType == bf16Type) || (retElemType == bf16Type)
        || (retElemType == i16Type) || (retElemType == i16Type)){
@@ -1519,13 +1481,13 @@ public:
       auto funcType =
           rewriter.getFunctionType(ValueRange(args).getTypes(), retType);
 
-      llvm::outs() << "\n\nfuncName: " << funcName << "\n";
+      dbgInfo("[FConvertToVCPattern]funcName: " + funcName);
 
       Operation *opPtr = op;
       lookupOrInsertIntrinsic(rewriter, opPtr, funcName, funcType);
       auto cvtData = rewriter.create<spirv::FunctionCallOp>(loc, retType,
                                                           funcName, args).getResults()[0]; 
-      llvm::outs() << "\n\ncvtData: " << cvtData << "\n";
+      dbgInfo("cvtData", cvtData);
 
       rewriter.replaceOp(op, cvtData);
     } else {
@@ -1543,10 +1505,10 @@ class BroadcastToVCPattern final
   matchAndRewrite(vector::BroadcastOp castOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = castOp.getLoc();
-    llvm::outs() << "\n\n[BroadcastToVCPattern]\n";
+    dbgInfo("[BroadcastToVCPattern]");
     Type resultType =
         getTypeConverter()->convertType(castOp.getResultVectorType());
-    //llvm::outs() << "\n\n[BroadcastToVCPattern]resultType: " << resultType << "\n";
+    //dbgInfo("[BroadcastToVCPattern]resultType",  resultType);
     if (!resultType)
       return failure();
 
@@ -1558,7 +1520,7 @@ class BroadcastToVCPattern final
     SmallVector<Value, 4> source(castOp.getResultVectorType().getNumElements(),
                                  adaptor.getSource());
     Value ret = rewriter.create<spirv::CompositeConstructOp>(loc, resultType, source);
-    //llvm::outs() << "\n\n[BroadcastToVCPattern]ret: " <<ret<<"\n";
+    //dbgInfo("[BroadcastToVCPattern]ret", ret);
     rewriter.replaceOp(castOp, ret);
     return success();
   }
@@ -1572,7 +1534,7 @@ class VectorInsertDynamicToVCPattern final
   matchAndRewrite(spirv::VectorInsertDynamicOp insertOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = insertOp.getLoc();
-    llvm::outs() << "\n\n[VectorInsertDynamicToVCPattern]\n";
+    dbgInfo("[VectorInsertDynamicToVCPattern]");
     Type resultType =
         getTypeConverter()->convertType(insertOp.getResult().getType());
 
@@ -1599,7 +1561,7 @@ class UndefOpToVCPattern final
   matchAndRewrite(spirv::UndefOp undefOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = undefOp.getLoc();
-    llvm::outs() << "\n\n[UndefOpToVCPattern]\n";
+    dbgInfo("[UndefOpToVCPattern]");
     Type resultType =
         getTypeConverter()->convertType(undefOp.getResult().getType());
 
@@ -1621,7 +1583,7 @@ class FAddOpToVCPattern final
   matchAndRewrite(spirv::FAddOp faddOp, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
     Location loc = faddOp.getLoc();
-    llvm::outs() << "\n\n[FAddOpToVCPattern]\n";
+    dbgInfo("[FAddOpToVCPattern]");
     Type resultType =
         getTypeConverter()->convertType(faddOp.getResult().getType());
 
@@ -1643,11 +1605,11 @@ public:
   LogicalResult
   matchAndRewrite(triton::ExternElementwiseOp op, OpAdaptor adaptor,
                   ConversionPatternRewriter &rewriter) const override {
-    llvm::outs()<<"\n\n[ExternElementwiseOpToVCPattern]: \n";
+    dbgInfo("[ExternElementwiseOpToVCPattern]");
     auto loc = op->getLoc();
 
     auto func = op.getSymbol();
-    llvm::outs()<<"\n\n[ExternElementwiseOpToVCPattern]func: " << func <<"\n";
+    dbgInfo("[ExternElementwiseOpToVCPattern]func: " + std::string(func));
 
     auto src = adaptor.getArgs();
     auto type = op.getResult().getType();
@@ -1675,16 +1637,16 @@ public:
 
     auto ret = rewriter.create<spirv::FunctionCallOp>(loc, ArrayRef<mlir::Type>{retType},
                                                             funcName, args).getResults()[0];
-    llvm::outs() << "\nFMaxOpToVCPattern ret: \n" << ret << "\n";
+    dbgInfo("FMaxOpToVCPattern ret", ret);
     rewriter.replaceOp(op, ret);
-    llvm::outs()<<"\n\n[ExternElementwiseOpToVCPattern]ret: " << ret <<"\n";
+    dbgInfo("[ExternElementwiseOpToVCPattern]ret", ret);
     return success();
   }
 };
 
 void populateXeGPUToVCIntrinsicsPatterns(
     XeGPUToSPIRVTypeConverter &typeConverter, RewritePatternSet &patterns) {
-  llvm::outs()<<"\n\npopulateXeGPUToVCIntrinsicsPatterns\n";
+  dbgInfo("[populateXeGPUToVCIntrinsicsPatterns]");
   patterns.add<DpasToVCPattern,
                AllocNbarrierToVCPattern, CreateNbarrierToVCPattern,
                NbarrierArriveToVCPattern, NbarrierWaitToVCPattern,
