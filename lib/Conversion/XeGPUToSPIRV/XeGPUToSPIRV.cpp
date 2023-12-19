@@ -213,6 +213,8 @@ public:
     bool usingSLM = memoryScope == xegpu::MemoryScope::SLM;
 
     auto tileType = op.getTensorDesc().getType();
+    auto elemType = tileType.getElementType();
+    auto bitwidth = elemType.getIntOrFloatBitWidth();
     auto rank = tileType.getRank();
 
     Value base;
@@ -250,7 +252,7 @@ public:
       auto blockWidth = tileType.getShape()[1];
       auto blockHeight = tileType.getShape()[0];
 
-      if(order[0] == 0){
+      if(order[0] == 0 && bitwidth == 16 && blockWidth <= 16){
         //todo Determine data type
         blockWidth /= 2;
       }
@@ -287,7 +289,8 @@ public:
                                                               blockInfo, idx7);
 
       auto offsetX = createOffset(1);
-      if(order[0] == 0){
+      //todo determine prefetch or load
+      if(order[0] == 0 && bitwidth == 16 && blockWidth <= 16){
         offsetX = udiv(offsetX, i32_val(2));
       }
       auto offsetY = createOffset(0);
