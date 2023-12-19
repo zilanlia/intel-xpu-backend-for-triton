@@ -237,7 +237,7 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
   sycl::range<3> local_range(local_range_z, local_range_y, local_range_x);
   sycl::nd_range<3> parallel_work_size(global_range, local_range);
 
-  if (getBoolEnv("MLIR_ENABLE_DUMP")){{
+  if (1 || getBoolEnv("MLIR_ENABLE_DUMP")){{
     std::cout << "kernel info name:" << kernel_name << " @" << &kernel_ptr << std::endl;
     std::cout << "kernel info attributes:" << kernel_ptr.get_info<sycl::info::kernel::attributes>() << std::endl;
     std::cout << "kernel info reference_count:" << kernel_ptr.get_info<sycl::info::kernel::reference_count>() << std::endl;
@@ -314,6 +314,224 @@ PYBIND11_MODULE(__triton_launcher, m) {{
 
 """  # noqa: E501
 
+def generate_launcher_l0(constants, signature):
+    print(signature)
+    arg_decls = ', '.join(f"{ty_to_cpp(ty)} arg{i}" for i, ty in signature.items())  # noqa: E501
+    arg_decls_list = []  # 创建一个空列表来存储生成的字符串
+    for i, ty in signature.items():  # 遍历 signature 字典的每个元素
+        arg_decl = f"{ty_to_cpp(ty)} arg{i}"  # 生成一个字符串
+        arg_decls_list.append(arg_decl)  # 将这个字符串添加到列表中
+    print(arg_decls_list)
+
+    def _extracted_type_pybind11(ty):
+        if ty[0] == '*':
+            return "py::object"
+        return {
+            'i1': 'int32_t',
+            'i32': 'int32_t',
+            'i64': 'int64_t',
+            'u32': 'uint32_t',
+            'u64': 'uint64_t',
+            'fp32': 'float',
+            'f32': 'float',
+            'fp64': 'double',
+        }[ty]
+
+    # Ipex available src
+    return f"""
+#include <pybind11/pybind11.h>
+#include <level_zero/ze_api.h>
+#include <cstdlib>
+#include <iostream>
+#ifdef TRITON_XPU_PROFILE
+#include <ipex.h>
+#include <ATen/record_function.h>
+#endif
+
+namespace py = pybind11;
+
+namespace {{
+
+bool getBoolEnv(const std::string &env) {{
+        const char *s = std::getenv(env.c_str());
+        std::string str(s ? s : "");
+        std::transform(str.begin(), str.end(), str.begin(),
+                        [](unsigned char c) {{ return std::tolower(c); }});
+        return (str == "on" || str == "true" || str == "1");
+}}
+
+}}
+
+static inline void* getPointer(const py::object& _obj, int idx) {{
+  PyObject* obj = _obj.ptr();
+  if (PyLong_Check(obj)) {{
+    auto ptrValue = PyLong_AsVoidPtr(obj);
+    if (PyErr_Occurred()) {{
+      PyErr_Print();
+    }}
+    return (void*)ptrValue;
+  }}
+  if (obj == Py_None) {{
+    return (void*)0;
+  }}
+  PyObject *ptr = PyObject_GetAttrString(obj, "data_ptr");
+  if (ptr) {{
+    PyObject *empty_tuple = PyTuple_New(0);
+    PyObject *ret = PyObject_Call(ptr, empty_tuple, NULL);
+    Py_DECREF(empty_tuple);
+    Py_DECREF(ptr);
+    if (!PyLong_Check(ret)) {{
+      PyErr_SetString(PyExc_TypeError, "data_ptr method of Pointer object must return 64-bit int");
+    }}
+    return (void*)PyLong_AsVoidPtr(ret);
+  }}
+  PyErr_SetString(PyExc_TypeError, "Pointer argument must be either uint64 or have data_ptr method");
+  return (void*)0;
+}}
+
+inline auto findXPUDevice()
+{{
+    zeInit(ZE_INIT_FLAG_GPU_ONLY);
+
+    // Discover all the driver instances
+    uint32_t driverCount = 0;
+    zeDriverGet(&driverCount, nullptr);
+
+    ze_driver_handle_t *allDrivers = (ze_driver_handle_t *)malloc(driverCount * sizeof(ze_driver_handle_t));
+    zeDriverGet(&driverCount, allDrivers);
+
+    ze_driver_handle_t hDriver = nullptr;
+    ze_device_handle_t hDevice = nullptr;
+    for (uint32_t i = 0; i < driverCount; ++i) {{
+        uint32_t deviceCount = 0;
+        hDriver = allDrivers[i];
+        zeDeviceGet(hDriver, &deviceCount, nullptr);
+
+        ze_device_handle_t *allDevices = (ze_device_handle_t *)malloc(deviceCount * sizeof(ze_device_handle_t));
+        zeDeviceGet(hDriver, &deviceCount, allDevices);
+        for (uint32_t d = 0; d < deviceCount; ++d) {{
+            ze_device_properties_t device_properties;
+            zeDeviceGetProperties(allDevices[d], &device_properties);
+            if (ZE_DEVICE_TYPE_GPU == device_properties.type) {{
+                hDevice = allDevices[d];
+                break;
+            }}
+        }}
+        free(allDevices);
+        if (nullptr != hDevice) {{
+            break;
+        }}
+    }}
+    free(allDrivers);
+    assert(hDriver);
+    assert(hDevice);
+
+    ze_context_desc_t contextDesc = {{ZE_STRUCTURE_TYPE_CONTEXT_DESC, nullptr, 0}};
+    ze_context_handle_t hContext = nullptr;
+    zeContextCreate(hDriver, &contextDesc, &hContext);
+
+    return std::make_tuple(hDriver, hDevice, hContext);
+}}
+
+static void l0_kernel_launch(int gridX, int gridY, int gridZ, int num_warps, int threads_per_warp, int shared_memory, ze_kernel_handle_t kernel{', ' if signature.items() else ''} {arg_decls}) {{
+
+  std::cout<<"l0_kernel_launch"<<std::endl;
+  void *params[] = {{ {', '.join(f"&arg{i}" for i in signature.keys() if i not in constants)} }};
+  uint32_t num_params = sizeof(params)/sizeof(params[0]);
+
+  size_t global_range_x = gridX*threads_per_warp*num_warps;
+  size_t global_range_y = gridY;
+  size_t global_range_z = gridZ;
+
+  size_t local_range_x = num_warps*threads_per_warp;
+  size_t local_range_y = 1;
+  size_t local_range_z = 1;
+  
+  auto castSz = [](size_t val) {{ return static_cast<uint32_t>(val); }};
+  
+  zeKernelSetGroupSize(kernel, castSz(local_range_x), 
+                               castSz(local_range_y),
+                               castSz(local_range_z));
+  ze_group_count_t launchArgs = {{castSz(global_range_x), 
+                                  castSz(global_range_y), 
+                                  castSz(global_range_z)}};
+  std::cout<<"set_scalar_arg"<<std::endl;
+  //{" ".join(f'set_scalar_arg(kernel, {idx}, sizeof({ty_to_cpp(item)}), params[{idx}]);' for idx, item in enumerate([signature[i] for i in signature if i not in constants]))}
+  
+  {" ".join(f'std::cout << "  param {idx}:" << "{item} :" << *({ty_to_cpp(item)}*)params[{idx}] << std::endl;' for idx, item in enumerate([signature[i] for i in signature if i not in constants]))}
+
+    std::cout << "launch num param:" << num_params << std::endl;
+    std::cout << "  gridx: " << gridX << std::endl;
+    std::cout << "  gridY: " << gridY << std::endl;
+    std::cout << "  gridZ: " << gridZ << std::endl;
+    std::cout << "  num_warps: " << num_warps << std::endl;
+    std::cout << "  threads_per_warp: " << threads_per_warp << std::endl;
+    std::cout << "  global range:[" << "x:"<< global_range_x << ", y:" << global_range_y << ", z:" << global_range_z << "]" << std::endl;
+    std::cout << "  local range:[" << "x:"<< local_range_x << ", y:" << local_range_y << ", z:" << local_range_z << "]" << std::endl;
+    std::cout << "  shared_memory: " << shared_memory << std::endl;
+
+  {" ".join(f'zeKernelSetArgumentValue(kernel, {idx}, 4, &arg{idx});' for idx, item in enumerate([signature[i] for i in signature if i not in constants]))}
+
+  if(0){{
+    zeKernelSetArgumentValue(kernel, 0, 4, &arg0);
+    zeKernelSetArgumentValue(kernel, 1, 4, &arg1);
+    zeKernelSetArgumentValue(kernel, 2, 4, &arg2);
+    zeKernelSetArgumentValue(kernel, 3, 4, &arg3);
+  }}
+
+  auto [l0_driver, l0_device, l0_context] = findXPUDevice();
+
+  ze_command_list_handle_t command_list = nullptr;
+  ze_command_list_desc_t commandListDesc = {{}};
+  zeCommandListCreate(l0_context, l0_device, &commandListDesc, &command_list);
+  ze_event_handle_t waitEvent = nullptr;
+  uint32_t numWaitEvents = 0;
+  ze_event_handle_t *phWaitEvents = nullptr;
+
+  std::cout<<"zeCommandListAppendLaunchKernel"<<std::endl;
+  zeCommandListAppendLaunchKernel(command_list, kernel,
+                                    &launchArgs, waitEvent,
+                                    numWaitEvents, phWaitEvents);
+
+  ze_command_queue_desc_t command_queue_description = {{ ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC, nullptr, 0, 0, 0,
+			ZE_COMMAND_QUEUE_MODE_DEFAULT, ZE_COMMAND_QUEUE_PRIORITY_NORMAL }};
+  ze_command_queue_handle_t command_queue = nullptr;
+  zeCommandQueueCreate(l0_context, l0_device, &command_queue_description, &command_queue);
+  zeCommandQueueExecuteCommandLists(command_queue, 1, &command_list, nullptr);
+  
+  zeCommandQueueSynchronize(command_queue, UINT32_MAX);
+}}
+
+PYBIND11_MODULE(__triton_l0_launcher, m) {{
+  m.doc() = "triton bindings to the C++ launcher API";
+    m.def("launch", [](int grid_x,
+                       int grid_y,
+                       int grid_z,
+                       int num_warps,
+                       int num_ctas,
+                       int clusterDimX,
+                       int clusterDimY,
+                       int clusterDimZ,
+                       int shared_memory,
+                       void* _stream,
+                       void* _kernel,
+                       py::object &launch_enter_hook,
+                       py::object &launch_exit_hook,
+                       py::object &compiled_kernel{', ' if signature.items() else ''}
+                       {', '.join([f"{_extracted_type_pybind11(ty)} _arg{i}" for i, ty in signature.items()])}){{
+      int threads_per_warp = 32;
+      std::cout<<"launch"<<std::endl;
+      //if(py::hasattr(compiled_kernel, "threads_per_warp"))
+      //  threads_per_warp = compiled_kernel.attr("threads_per_warp").cast<int>();
+      std::cout<<"ze_kernel_handle_t"<<std::endl;
+      ze_kernel_handle_t* kernel_ptr = static_cast<ze_kernel_handle_t*>(_kernel);
+      ze_kernel_handle_t kernel = *kernel_ptr;
+      l0_kernel_launch(grid_x, grid_y, grid_z, num_warps, threads_per_warp, shared_memory, kernel{', ' if signature.items() else ''}
+             {', '.join(f"getPointer(_arg{i},{i})" if ty[0] == "*" else f"_arg{i}" for i, ty in signature.items())});
+    }});
+}}
+
+"""  # noqa: E501
 
 def _build_xpu_ext(name, src, srcdir):
 
@@ -406,13 +624,62 @@ class SYCLDriver(DriverBase):
         # self.backend = self.SYCL
         self.backend = "SYCL"
 
+import inspect
+#
+# LEVEl_ZERO
+#
+class L0Utils(object):
+
+    def __new__(cls):
+        if not hasattr(cls, 'instance'):
+            cls.instance = super(L0Utils, cls).__new__(cls)
+        return cls.instance
+
+    def __init__(self):
+        dirname = os.path.dirname(os.path.realpath(__file__))
+        src = Path(os.path.join(dirname, "utils", "level_zero.cpp")).read_text()
+        key = hashlib.md5(src.encode("utf-8")).hexdigest()
+        cache = get_cache_manager(key)
+        fname = "l0_utils.so"
+        cache_path = cache.get_file(fname)
+        print("cache_path:, ", cache_path)
+        if cache_path is None:
+            with tempfile.TemporaryDirectory() as tmpdir:
+                src_path = os.path.join(tmpdir, "main.cpp")
+                with open(src_path, "w") as f:
+                    f.write(src)
+                so = _build_xpu_ext("l0_utils", src_path, tmpdir)
+                with open(so, "rb") as f:
+                    cache_path = cache.put(f.read(), fname, binary=True)
+        import importlib.util
+        spec = importlib.util.spec_from_file_location("l0_utils", cache_path)
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        self.load_binary = mod.load_binary
+        print("self.load_binary")
+        print(self.load_binary)
+        self.get_device_properties = mod.get_device_properties
+
+
+class L0Driver(DriverBase):
+
+    def __new__(cls):
+        if not hasattr(cls, 'instance'):
+            cls.instance = super(L0Driver, cls).__new__(cls)
+        return cls.instance
+
+    def __init__(self):
+        self.utils = L0Utils()
+        # self.backend = self.L0
+        self.backend = "L0"
 
 class XPUBackend(BaseBackend):
     stub_so_path = ""
 
     def __init__(self, device_type: str) -> None:
         super(XPUBackend, self).__init__(device_type)
-        self.driver = SYCLDriver()
+        # self.driver = SYCLDriver()
+        self.driver = L0Driver()
 
     def add_stages(self, arch, extern_libs, stages):
         filter_in_stages = ["ast", "ttir"]
@@ -460,9 +727,13 @@ class XPUBackend(BaseBackend):
         torch.xpu.set_device(device)
 
     def get_load_binary_fn(self):
+        print("get_load_binary_fn")
 
         def _load_binary_fn(kernel_name, binary, shared_size, device):
-            return self.driver.utils.load_binary(kernel_name, binary, shared_size, torch.xpu.device(device).sycl_device)  # noqa: E501
+            ret = self.driver.utils.load_binary(kernel_name, binary, shared_size, torch.xpu.device(device).sycl_device)  # noqa: E501
+            print("_load_binary_fn")
+            # print(ret)
+            return ret
 
         return _load_binary_fn
 
@@ -478,7 +749,7 @@ class XPUBackend(BaseBackend):
         sub_group_sizes = arch['sub_group_sizes']
         # TODO: chose a reasonable subgroup size
         threads_per_warp = 32
-        assert threads_per_warp in sub_group_sizes, "Current platform does not support threads_per_warp to be 32"  # noqa: E501
+        # assert threads_per_warp in sub_group_sizes, "Current platform does not support threads_per_warp to be 32"  # noqa: E501
         num_warps = max_work_group_size // threads_per_warp
         assert num_warps < max_num_sub_groups, \
             "invalid setting. max_work_group_size {}, max_num_subgroup {}, subgroup_sizes {}".format(  # noqa: E501
@@ -497,7 +768,9 @@ class XPUBackend(BaseBackend):
         cache_path = so_cache_manager.get_file(so_name)
         if cache_path is None:
             with tempfile.TemporaryDirectory() as tmpdir:
-                src = generate_launcher(constants, signature)
+                # src = generate_launcher(constants, signature)
+                print("generate_launcher_l0")
+                src = generate_launcher_l0(constants, signature)
                 src_path = os.path.join(tmpdir, "main.cpp")
                 with open(src_path, "w") as f:
                     f.write(src)

@@ -60,6 +60,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
 
     file(INSTALL
          ${CMAKE_CURRENT_SOURCE_DIR}/utils/sycl.cpp
+         ${CMAKE_CURRENT_SOURCE_DIR}/utils/level_zero.cpp
          DESTINATION ${PYTHON_THIRD_PARTY_PATH}/xpu/utils)
 
     file(INSTALL
