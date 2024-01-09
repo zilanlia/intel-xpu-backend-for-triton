@@ -28,6 +28,8 @@ if(TRITON_BUILD_PYTHON_MODULE)
             TritonGPUTransforms
             TritonSPIRV
             TritonGPUToSPIRV
+            TritonGPUToLLVM
+            TritonLLVMIR
             ${dialect_libs}
             ${conversion_libs}
 

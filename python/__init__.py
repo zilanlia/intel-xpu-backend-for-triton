@@ -78,6 +78,9 @@ def ttgir_to_spirv(mod, extern_libs, arch):
     mod.share_memory_size = share_memory_size
     return spirv_code
 
+def ttgir_to_llir(mod, extern_libs, arch, tma_infos):
+    return _triton.translate_triton_gpu_to_llvmir(mod, 80, tma_infos)
+
 
 def spirv_to_spvbin(spirv: str, compute_capability: int):
     # return _triton.compile_spirv_to_spvbin(spirv, compute_capability)
@@ -681,7 +684,7 @@ class XPUBackend(BaseBackend):
         # self.driver = SYCLDriver()
         self.driver = L0Driver()
 
-    def add_stages(self, arch, extern_libs, stages):
+    def add_stages(self, arch, extern_libs, stages, tma_infos):
         filter_in_stages = ["ast", "ttir"]
         filter_out_stages = []
         for key, _ in stages.items():
@@ -694,10 +697,12 @@ class XPUBackend(BaseBackend):
 
         stages["ttgir"] = (lambda path: _triton.parse_mlir_module(Path(path).read_text(), context),
                            lambda src: optimize_ttgir(ttir_to_ttgir(src, arch["num_warps"]), arch["num_stages"], arch))
-        stages["spirv"] = (lambda path: Path(path).read_text(),
-                           lambda src: ttgir_to_spirv(src, extern_libs, arch))
-        stages["spvbin"] = (lambda path: Path(path).read_bytes(),
-                            lambda src: spirv_to_spvbin(src, arch))
+        # stages["spirv"] = (lambda path: Path(path).read_text(),
+        #                    lambda src: ttgir_to_spirv(src, extern_libs, arch))
+        # stages["spvbin"] = (lambda path: Path(path).read_bytes(),
+        #                     lambda src: spirv_to_spvbin(src, arch))
+        stages["llir_xpu"] = (lambda path: Path(path).read_text(),
+                           lambda src: ttgir_to_llir(src, extern_libs, arch, tma_infos))
 
     def add_meta_info(self, ir, module, next_module, metadata, asm):
         if ir == "spirv":

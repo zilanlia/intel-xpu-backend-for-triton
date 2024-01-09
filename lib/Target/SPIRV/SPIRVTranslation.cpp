@@ -465,7 +465,7 @@ translateTritonGPUToSPIRVIR(mlir::ModuleOp module,
   return spirvModule;
 }
 
-void addExternalLibs(mlir::ModuleOp &module,
+void addExternalLibsXPU(mlir::ModuleOp &module,
                      const std::vector<std::string> &names,
                      const std::vector<std::string> &paths) {
   if (names.empty() || names.size() != paths.size())

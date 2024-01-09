@@ -14,7 +14,7 @@ using ::mlir::triton::gpu::isaDistributedLayout;
 using ::mlir::triton::gpu::SharedEncodingAttr;
 
 SmallVector<Value>
-getThreadIds(Value threadId, ArrayRef<unsigned int> shapePerCTATile,
+getThreadIdsXPU(Value threadId, ArrayRef<unsigned int> shapePerCTATile,
              ArrayRef<unsigned int> sizePerThread, ArrayRef<unsigned int> order,
              ConversionPatternRewriter &rewriter, Location loc) {
   int dim = order.size();
@@ -31,7 +31,7 @@ getThreadIds(Value threadId, ArrayRef<unsigned int> shapePerCTATile,
 }
 
 // Get shapePerCTATile for M or N axis.
-int getShapePerCTATileForMN(BlockedEncodingAttr layout, bool isM) {
+int getShapePerCTATileForMNXPU(BlockedEncodingAttr layout, bool isM) {
   auto order = layout.getOrder();
   auto shapePerCTATile = getShapePerCTATile(layout);
 
@@ -43,7 +43,7 @@ int getShapePerCTATileForMN(BlockedEncodingAttr layout, bool isM) {
 }
 
 // Get sizePerThread for M or N axis.
-int getSizePerThreadForMN(BlockedEncodingAttr layout, bool isM) {
+int getSizePerThreadForMNXPU(BlockedEncodingAttr layout, bool isM) {
   auto order = layout.getOrder();
   auto sizePerThread = getSizePerThread(layout);
 
@@ -116,7 +116,7 @@ Value loadAFMA(Value A, Value llA, BlockedEncodingAttr dLayout, Value thread,
   Value mContig = i32_val(sizePerThread[order[1]]);
 
   // threadId in blocked layout
-  auto threadIds = getThreadIds(thread, shapePerCTATile, sizePerThread, order,
+  auto threadIds = getThreadIdsXPU(thread, shapePerCTATile, sizePerThread, order,
                                 rewriter, loc);
   Value threadIdM = threadIds[0];
 
@@ -135,8 +135,8 @@ Value loadAFMA(Value A, Value llA, BlockedEncodingAttr dLayout, Value thread,
 
   SmallVector<Value> vas;
 
-  int mShapePerCTATile = getShapePerCTATileForMN(dLayout, true /*isM*/);
-  int mSizePerThread = getSizePerThreadForMN(dLayout, true /*isM*/);
+  int mShapePerCTATile = getShapePerCTATileForMNXPU(dLayout, true /*isM*/);
+  int mSizePerThread = getSizePerThreadForMNXPU(dLayout, true /*isM*/);
 
   for (unsigned k = 0; k < K; ++k)
     for (unsigned m = 0; m < M; m += mShapePerCTATile)
@@ -180,7 +180,7 @@ Value loadBFMA(Value B, Value llB, BlockedEncodingAttr dLayout, Value thread,
   Value nContig = i32_val(sizePerThread[order[0]]);
 
   // threadId in blocked layout
-  auto threadIds = getThreadIds(thread, shapePerCTATile, sizePerThread, order,
+  auto threadIds = getThreadIdsXPU(thread, shapePerCTATile, sizePerThread, order,
                                 rewriter, loc);
   Value threadIdN = threadIds[1];
 
@@ -199,8 +199,8 @@ Value loadBFMA(Value B, Value llB, BlockedEncodingAttr dLayout, Value thread,
 
   SmallVector<Value> vbs;
 
-  int nShapePerCTATile = getShapePerCTATileForMN(dLayout, false /*isM*/);
-  int nSizePerThread = getSizePerThreadForMN(dLayout, false /*isM*/);
+  int nShapePerCTATile = getShapePerCTATileForMNXPU(dLayout, false /*isM*/);
+  int nSizePerThread = getSizePerThreadForMNXPU(dLayout, false /*isM*/);
 
   for (unsigned k = 0; k < K; ++k)
     for (unsigned n = 0; n < N; n += nShapePerCTATile)

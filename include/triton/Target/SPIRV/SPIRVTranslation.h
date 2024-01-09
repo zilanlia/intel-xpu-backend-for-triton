@@ -12,7 +12,7 @@ namespace mlir {
 namespace triton {
 
 // add external dependent libs
-void addExternalLibs(mlir::ModuleOp &module,
+void addExternalLibsXPU(mlir::ModuleOp &module,
                      const std::vector<std::string> &names,
                      const std::vector<std::string> &paths);
 

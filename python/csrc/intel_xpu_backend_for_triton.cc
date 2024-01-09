@@ -22,6 +22,9 @@
 #include <stdexcept>
 #include <string>
 
+#include "mlir/Dialect/LLVMIR/LLVMDialect.h"
+#include "triton/Target/LLVMIR/LLVMIRTranslation.h"
+#include "triton/Conversion/TritonGPUToLLVM/TritonGPUToLLVMPass.h"
 #include "triton/Conversion/TritonToTritonGPU/TritonToTritonGPUPass.h"
 #include "triton/Dialect/Triton/Transforms/Passes.h"
 #include "triton/Dialect/TritonGPU/Transforms/Passes.h"
@@ -163,6 +166,26 @@ void init_triton_translation(py::module &m) {
       ret::take_ownership);
 
   m.def(
+      "translate_triton_gpu_to_llvmir",
+      [](mlir::ModuleOp op, int computeCapability,
+         mlir::triton::gpu::TMAMetadataTy &tmaInfos) {
+        py::gil_scoped_release allow_threads;
+        llvm::LLVMContext llvmContext;
+        std::cout<<"\n\ncomputeCapability: "<<computeCapability<<std::endl;
+        auto llvmModule = ::mlir::triton::translateTritonGPUToLLVMIR(
+            &llvmContext, op, computeCapability, tmaInfos, mlir::triton::NVVM);
+        if (!llvmModule)
+          llvm::report_fatal_error("Failed to translate TritonGPU to LLVM IR.");
+
+        std::string str;
+        llvm::raw_string_ostream os(str);
+        llvmModule->print(os, nullptr);
+        os.flush();
+        return str;
+      },
+      ret::take_ownership);
+
+  m.def(
       "translate_triton_gpu_to_spirv",
       [](const std::string &ttgir, py::dict computeCapability) {
         mlir::MLIRContext context;
@@ -202,7 +225,7 @@ void init_triton_translation(py::module &m) {
   m.def("add_external_libs",
         [](mlir::ModuleOp &op, const std::vector<std::string> &names,
            const std::vector<std::string> &paths) {
-          ::mlir::triton::addExternalLibs(op, names, paths);
+          ::mlir::triton::addExternalLibsXPU(op, names, paths);
         });
 
   m.def("compile_spirv_to_spvbin",
