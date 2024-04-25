@@ -35,20 +35,21 @@ static PyObject *parseDeviceArch(PyObject *self, PyObject *args) {
   if (!PyArg_ParseTuple(args, "K", &dev_arch))
     return Py_BuildValue("N", device_arch);
 
-  sycl::ext::oneapi::experimental::architecture sycl_arch =
-      static_cast<sycl::ext::oneapi::experimental::architecture>(dev_arch);
-  switch (sycl_arch) {
-  case sycl::ext::oneapi::experimental::architecture::intel_gpu_pvc:
-    Py_DECREF(device_arch);
-    device_arch = PyObject_GetAttrString(device_archs, (char *)"PVC");
-    break;
-  case sycl::ext::oneapi::experimental::architecture::intel_gpu_dg2_g10:
-  case sycl::ext::oneapi::experimental::architecture::intel_gpu_dg2_g11:
-    Py_DECREF(device_arch);
-    device_arch = PyObject_GetAttrString(device_archs, (char *)"ATS");
-    break;
-  default:; // fall through
-  }
+  // sycl::ext::oneapi::experimental::architecture sycl_arch =
+  //     static_cast<sycl::ext::oneapi::experimental::architecture>(dev_arch);
+  // switch (sycl_arch) {
+  // case sycl::ext::oneapi::experimental::architecture::intel_gpu_pvc:
+  //   Py_DECREF(device_arch);
+  //   device_arch = PyObject_GetAttrString(device_archs, (char *)"PVC");
+  //   break;
+  // case sycl::ext::oneapi::experimental::architecture::intel_gpu_dg2_g10:
+  // case sycl::ext::oneapi::experimental::architecture::intel_gpu_dg2_g11:
+  //   Py_DECREF(device_arch);
+  //   device_arch = PyObject_GetAttrString(device_archs, (char *)"ATS");
+  //   break;
+  // default:; // fall through
+  // }
+  device_arch = PyObject_GetAttrString(device_archs, (char *)"PVC");
   Py_DECREF(tritonIntelGPUPassesModule);
   Py_DECREF(device_archs);
 
