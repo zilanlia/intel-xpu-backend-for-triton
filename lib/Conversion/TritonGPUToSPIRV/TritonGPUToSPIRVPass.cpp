@@ -391,7 +391,7 @@ public:
 
     SPIRVConversionOptions options;
     // TODO: need confirm
-    options.use64bitIndex = true;
+    options.use64bitIndex = false;
     TritonGPUToSPIRVTypeConverter spirvTypeConverter(targetAttr, options);
     TritonSPIRVFunctionConversionTarget funcTarget(*context,
                                                    spirvTypeConverter);

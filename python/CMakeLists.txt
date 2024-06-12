@@ -26,6 +26,7 @@ if(TRITON_BUILD_PYTHON_MODULE)
             TritonAnalysis
             TritonTransforms
             TritonGPUTransforms
+            XeGPUTransforms
             TritonSPIRV
             TritonGPUToSPIRV
             ${dialect_libs}

@@ -52,22 +52,43 @@ def ttir_to_ttgir(mod, num_warps):
 def optimize_ttgir(mod, num_stages, arch):
     pm = _triton.pass_manager(mod.context)
     pm.enable_debug()
-    pm.add_tritongpu_coalesce_pass()
-    pm.add_tritongpu_remove_layout_conversions_pass()
+    # will convert genericLayout to blockedLayout for load and store
+    # pm.add_tritongpu_coalesce_pass()  
+    # pm.add_tritongpu_remove_layout_conversions_pass()
     # pm.add_triton_intel_gpu_accelerate_matmul_pass(arch)
-    pm.add_tritongpu_remove_layout_conversions_pass()
-    pm.add_tritongpu_optimize_dot_operands_pass()
+    # pm.add_tritongpu_remove_layout_conversions_pass()
+    # pm.add_tritongpu_optimize_dot_operands_pass()
     pm.add_tritongpu_pipeline_pass(num_stages)
-    pm.add_tritongpu_prefetch_pass()
-    pm.add_tritongpu_optimize_dot_operands_pass()
-    pm.add_tritongpu_remove_layout_conversions_pass()
-    pm.add_tritongpu_decompose_conversions_pass()
+    pm.add_tritongpu_layout_propagation_pass()
+    pm.add_tritongpu_prefetch_to_cache_pass()
+    # pm.add_tritongpu_optimize_dot_operands_pass()
+    # pm.add_tritongpu_remove_layout_conversions_pass()
+    # pm.add_tritongpu_decompose_conversions_pass()
     pm.add_tritongpu_reorder_instructions_pass()
-    pm.add_cse_pass()
+    # pm.add_cse_pass()
     pm.add_symbol_dce_pass()
     pm.run(mod)
     return mod
 
+def ttgir_to_xegir(mod):
+    pm = _triton.pass_manager(mod.context)
+    pm.add_convert_tritongpu_to_xegpu_pass()
+    pm.run(mod)
+    return mod
+
+def optimize_xegir(mod):
+    pm = _triton.pass_manager(mod.context)
+    pm.add_xegpu_optimize_dotop_pass()
+    pm.run(mod)
+    return mod
+
+def xegir_to_spirv(mod, extern_libs, compute_capability):
+    if extern_libs:
+        add_external_libs(mod, extern_libs)
+    #todo
+    share_memory_size = 4096
+    mod.share_memory_size = share_memory_size
+    return _triton.translate_xegpu_to_spirv(mod, compute_capability)
 
 # SPIRV translation
 
@@ -225,11 +246,13 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
   uint32_t num_params = sizeof(params)/sizeof(params[0]);
   uint32_t expected_num_params = kernel_ptr.get_info<sycl::info::kernel::num_args>();
 
-  size_t global_range_x = gridX*threads_per_warp*num_warps;
+  size_t global_range_x = gridX * 8;
+  //size_t global_range_x = 32;
   size_t global_range_y = gridY;
   size_t global_range_z = gridZ;
 
-  size_t local_range_x = num_warps*threads_per_warp;
+  //size_t local_range_x = num_warps*threads_per_warp;
+  size_t local_range_x = 8;
   size_t local_range_y = 1;
   size_t local_range_z = 1;
 
@@ -237,7 +260,7 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
   sycl::range<3> local_range(local_range_z, local_range_y, local_range_x);
   sycl::nd_range<3> parallel_work_size(global_range, local_range);
 
-  if (getBoolEnv("MLIR_ENABLE_DUMP")){{
+  if (1 || getBoolEnv("MLIR_ENABLE_DUMP")){{
     std::cout << "kernel info name:" << kernel_name << " @" << &kernel_ptr << std::endl;
     std::cout << "kernel info attributes:" << kernel_ptr.get_info<sycl::info::kernel::attributes>() << std::endl;
     std::cout << "kernel info reference_count:" << kernel_ptr.get_info<sycl::info::kernel::reference_count>() << std::endl;
@@ -257,9 +280,11 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
     {" ".join(f'std::cout << "  param {idx}:" << *({ty_to_cpp(item)}*)params[{idx}] << std::endl;' for idx, item in enumerate([signature[i] for i in signature if i not in constants]))}
   }}
 
-  if (shared_memory) {{
-    expected_num_params -= 1;
-  }}
+   //if (shared_memory) {{
+   //  expected_num_params -= 1;
+   //}}
+   //std::cout<<"num_params : "<<num_params<<std::endl;
+   //std::cout<<"expected num_params  :  "<<expected_num_params<<std::endl;
   assert(num_params == expected_num_params && "number of kernel param not matched");
 
   // Submit the imported kernel.
@@ -267,7 +292,7 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
 
     {" ".join(f'set_scalar_arg(cgh, {idx}, sizeof({ty_to_cpp(item)}), params[{idx}]);' for idx, item in enumerate([signature[i] for i in signature if i not in constants]))}
 
-    if (shared_memory) {{
+    if (0 && shared_memory) {{
         using share_mem_t = sycl::accessor<int8_t, 1, sycl::access::mode::read_write, sycl::access::target::local>;
         share_mem_t local_buffer = share_mem_t(shared_memory, cgh);
         cgh.set_arg(num_params, local_buffer);
@@ -279,7 +304,15 @@ RECORD_FUNCTION("XPU Triton kernel:" + kernel_name, {{}});
 
     }};
 
-  auto event = stream.submit(cgf);
+    auto event = stream.submit(cgf);
+    event.wait();
+    auto start = event.get_profiling_info<sycl::info::event_profiling::command_start>();
+    auto end = event.get_profiling_info<sycl::info::event_profiling::command_end>();
+    double gpu_time = (end - start) / 1000000.0;
+    std::cout << "gpu_time: " << gpu_time << " ms" <<std::endl;
+    double ops = 2.0 * 4096 * 4096 * 4096;
+    std::cout << "[perfermance][GPU] Average GFLOPS(GPU_time) of this gemm kernel is " << (ops / 1000000) / gpu_time << std::endl;
+
 #ifdef TRITON_XPU_PROFILE
 xpu::profiler_record(kernel_name, event);
 #endif
@@ -424,13 +457,27 @@ class XPUBackend(BaseBackend):
             stages.pop(filter_out_key)
 
         context = _triton.context()
-
-        stages["ttgir"] = (lambda path: _triton.parse_mlir_module(Path(path).read_text(), context),
-                           lambda src: optimize_ttgir(ttir_to_ttgir(src, arch["num_warps"]), arch["num_stages"], arch))
-        stages["spirv"] = (lambda path: Path(path).read_text(),
-                           lambda src: ttgir_to_spirv(src, extern_libs, arch))
-        stages["spvbin"] = (lambda path: Path(path).read_bytes(),
-                            lambda src: spirv_to_spvbin(src, arch))
+        enable_xegpu = 1
+        if enable_xegpu:
+            stages["ttgir"] = (lambda path: _triton.parse_mlir_module(Path(path).read_text(), context),
+                            lambda src: ttir_to_ttgir(src, arch["num_warps"]))
+            stages["optimized_ttgir"] = (lambda path: _triton.parse_mlir_module(Path(path).read_text(), context),
+                            lambda src: optimize_ttgir(src, arch["num_stages"], arch))
+            stages["xegir"] = (lambda path: Path(path).read_text(),
+                            lambda src: ttgir_to_xegir(src))
+            stages["optimize_xegir"] = (lambda path: Path(path).read_text(),
+                            lambda src: optimize_xegir(src))
+            stages["spirv"] = (lambda path: Path(path).read_text(),
+                            lambda src: xegir_to_spirv(src, extern_libs, arch))
+            stages["spvbin"] = (lambda path: Path(path).read_bytes(),
+                                lambda src: spirv_to_spvbin(src, arch))
+        else:
+            stages["ttgir"] = (lambda path: _triton.parse_mlir_module(Path(path).read_text(), context),
+                            lambda src: optimize_ttgir(ttir_to_ttgir(src, arch["num_warps"]), arch["num_stages"], arch))
+            stages["spirv"] = (lambda path: Path(path).read_text(),
+                            lambda src: ttgir_to_spirv(src, extern_libs, arch))
+            stages["spvbin"] = (lambda path: Path(path).read_bytes(),
+                                lambda src: spirv_to_spvbin(src, arch))
 
     def add_meta_info(self, ir, module, next_module, metadata, asm):
         if ir == "spirv":
